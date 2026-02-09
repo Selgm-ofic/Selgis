@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "selgis"
+version = "0.1.0"
+description = "Universal Training Framework for PyTorch and HuggingFace Transformers"
+readme = "README.md"
+license = { text = "Apache 2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Selgis ML" }]
+keywords = ["pytorch", "transformers", "training", "lora", "peft", "deep-learning", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.20",
+    "tqdm",  # Добавил tqdm, так как он де-факто стандарт для прогресс-баров
+]
+
+[project.optional-dependencies]
+# Базовый набор для трансформеров + accelerate (критичен для device_map="auto")
+transformers = [
+    "transformers>=4.30",
+    "datasets",
+    "accelerate>=0.21.0"
+]
+
+# Для LoRA / QLoRA
+peft = ["peft>=0.5.0"]
+
+# Для обучения LLM (квантование 4-bit/8-bit)
+llm = [
+    "bitsandbytes>=0.41.0",
+    "accelerate>=0.21.0",
+    "scipy"
+]
+
+# Логирование
+tracking = ["wandb"]
+
+# Для разработки
+dev = ["pytest", "pytest-cov", "ruff>=0.1"]
+
+# Установить всё сразу: pip install selgis[all]
+all = [
+    "transformers>=4.30",
+    "datasets",
+    "accelerate>=0.21.0",
+    "peft>=0.5.0",
+    "bitsandbytes>=0.41.0",
+    "scipy",
+    "wandb"
+]
+
+[project.scripts]
+selgis = "selgis.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["selgis*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
