@@ -20,6 +20,7 @@ def _cmd_version() -> int:
 def _cmd_device() -> int:
     """Print compute device info (CUDA/MPS/CPU)."""
     from selgis.utils import get_device
+    # Here we explicitly want to print info
     get_device("auto")
     return 0
 
@@ -36,13 +37,16 @@ def _cmd_train(args: argparse.Namespace) -> int:
         return 0
 
     from selgis import Trainer, SelgisConfig
-    from selgis.utils import get_device, seed_everything
+    from selgis.utils import seed_everything
     import torch
     import torch.nn as nn
     from torch.utils.data import DataLoader, TensorDataset
 
     print("Running minimal demo (synthetic data)...")
-    device = get_device("auto")
+    
+    # Removed get_device("auto") here to avoid double printing.
+    # Trainer will call it internally and print the info once.
+    
     seed_everything(42)
 
     model = nn.Sequential(
@@ -60,6 +64,8 @@ def _cmd_train(args: argparse.Namespace) -> int:
         lr_finder_enabled=False,
         nan_recovery=True,
     )
+    
+    # Trainer initializes device and prints info automatically
     trainer = Trainer(
         model=model,
         config=config,
@@ -84,8 +90,8 @@ def main() -> int:
         help="Show version and exit",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
     subparsers.add_parser("version", help="Show version")
-
     subparsers.add_parser("device", help="Show compute device (CUDA/MPS/CPU)")
 
     train_parser = subparsers.add_parser("train", help="Run training")
