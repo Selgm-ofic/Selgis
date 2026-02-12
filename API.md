@@ -1,10 +1,121 @@
 
 # SELGIS API Reference
 
-**Version:** from package metadata (`selgis --version`)  
+**Version:** 0.2.0 (Stable)  
 **Python:** 3.10+
 
-SELGIS is a universal training framework for PyTorch and HuggingFace Transformers. It provides training protection (NaN/loss spike recovery, rollback), learning-rate scheduling, LR finder, callbacks, and optional PEFT/LoRA support.
+SELGIS is a universal training framework for PyTorch and HuggingFace Transformers. It provides training protection (NaN/loss spike recovery, rollback), learning-rate scheduling, LR finder, callbacks, and specialized support for quantization (4-bit/8-bit) and PEFT/LoRA.
+
+---
+
+## OpenAPI 3.0 Specification (CLI)
+
+SELGIS exposes its main functionality via a CLI that follows a structured schema. Below is a conceptual OpenAPI representation of the training endpoint.
+
+```yaml
+openapi: 3.0.0
+info:
+  title: SELGIS CLI Training API
+  version: 0.2.0
+  description: API for managing ML training runs via CLI.
+paths:
+  /train:
+    post:
+      summary: Start a training run
+      description: Initiates a training process with a specified configuration.
+      parameters:
+        - name: config
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Path to a YAML or JSON configuration file.
+      responses:
+        '200':
+          description: Training completed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrainingMetrics'
+        '400':
+          description: Invalid configuration parameters.
+        '500':
+          description: Training failed due to hardware or logic error.
+
+components:
+  schemas:
+    TrainingMetrics:
+      type: object
+      properties:
+        train_loss:
+          type: number
+        eval_loss:
+          type: number
+        accuracy:
+          type: number
+        epoch:
+          type: integer
+```
+
+---
+
+## Authentication & Security
+
+### HuggingFace Hub
+When using `TransformerTrainer.push_to_hub()`, SELGIS uses the standard HuggingFace authentication token.
+
+**Setup:**
+```bash
+huggingface-cli login
+```
+Alternatively, set the `HUGGING_FACE_HUB_TOKEN` environment variable.
+
+### Weight Security
+SELGIS prioritizes security when loading external checkpoints.
+- **`weights_only=True`**: (Default in `load_model`) Prevents arbitrary code execution by loading only tensors.
+- **Breaking Change (v0.2.0)**: In PyTorch < 2.0, where `weights_only` is not supported, a `[WARN]` is issued, and a standard load is performed. Only use trusted checkpoints in legacy environments.
+
+---
+
+## Multi-Language Examples
+
+### Python (Standard API)
+```python
+from selgis import TransformerConfig, TransformerTrainer
+
+config = TransformerConfig(
+    model_name_or_path="facebook/opt-125m",
+    quantization_type="4bit",
+    use_peft=True
+)
+trainer = TransformerTrainer(model_or_path=config.model_name_or_path, config=config, ...)
+trainer.train()
+```
+
+### Bash (CLI)
+```bash
+# Basic training
+selgis train
+
+# Training with custom config
+selgis train --config ./my_config.yaml
+
+# Check device availability
+selgis device
+```
+
+### Node.js (via Child Process)
+```javascript
+const { exec } = require('child_process');
+
+exec('selgis train --config custom.json', (error, stdout, stderr) => {
+  if (error) {
+    console.error(`Error: ${error.message}`);
+    return;
+  }
+  console.log(`Output: ${stdout}`);
+});
+```
 
 ---
 
@@ -171,6 +282,10 @@ Extends `SelgisConfig` for HuggingFace models.
 | `peft_config` | dict | {} | PEFT config (e.g. LoraConfig kwargs) |
 | `gradient_checkpointing` | bool | False | Enable gradient checkpointing |
 | `deepspeed_config` | str \| None | None | Path to DeepSpeed config |
+| `quantization_type` | `"no" \| "8bit" \| "4bit"` | `"no"` | BitsAndBytes quantization strategy |
+| `bnb_4bit_compute_dtype` | `"float16" \| "bfloat16" \| "float32"` | `"float16"` | Compute dtype for 4-bit |
+| `bnb_4bit_quant_type` | `"fp4" \| "nf4"` | `"nf4"` | 4-bit quantization type |
+| `bnb_4bit_use_double_quant` | bool | False | Use nested quantization for 4-bit |
 
 ---
 
@@ -267,7 +382,29 @@ Stops training when `metric` does not improve for `patience` epochs. `mode`: `"m
 
 Saves checkpoints (trainable state_dict, optimizer, metrics) per epoch; keeps best and up to `save_total_limit` others.
 
+### `HistoryCallback(output_dir="./output")`
+
+**New in v0.2.0.** Automatically added by `Trainer`. Saves `training_history.json` on training end.
+
+**JSON Structure:**
+```json
+{
+  "config": { ... },
+  "model_type": "...",
+  "history": [
+    { "epoch": 0, "metrics": { "loss": 0.5, "accuracy": 85.0 } },
+    ...
+  ],
+  "final_metrics": { ... }
+}
+```
+
 ### `LoggingCallback(log_every=10)`
+
+**Redesigned in v0.2.0.** Minimalist style.
+- `[INFO]`: General progress.
+- `[WARN]`: Non-critical issues (e.g. missing bitsandbytes).
+- `[SAVE]`: File saving events.
 
 Logs step loss/LR every `log_every` steps and epoch metrics at end of epoch.
 
@@ -329,6 +466,7 @@ Finds a good learning rate by exponentially sweeping LR and choosing a point nea
 
 ## Utils
 
+- **`__version__`**: Current library version.
 - **`get_device(preference="auto") -> torch.device`**  
   Resolves device: auto (cuda/mps/cpu), cuda, cpu, mps. Prints device and GPU info.
 
@@ -355,3 +493,32 @@ Finds a good learning rate by exponentially sweeping LR and choosing a point nea
 
 - **`get_optimizer_grouped_params(model, weight_decay, no_decay_keywords=("bias", "LayerNorm", "layer_norm")) -> list[dict]`**  
   Returns param groups for optimizer (decay vs no-decay).
+
+---
+
+## Error Handling & Exceptions
+
+SELGIS uses structured exceptions and logging to handle common ML issues.
+
+### Common Exceptions
+| Exception | Trigger | Recommended Action |
+|-----------|---------|-------------------|
+| `ImportError` | Missing `transformers`, `peft`, or `bitsandbytes`. | Install via `pip install selgis[all]`. |
+| `ValueError` | Conflicting config (e.g. `fp16=True` & `bf16=True`). | Correct the configuration file/object. |
+| `ZeroDivisionError` | Model has no trainable parameters. | Ensure LoRA is correctly applied or layers are unfrozen. |
+
+### Training Protection (Rollback)
+If `nan_recovery=True` (default), SELGIS monitors loss for anomalies.
+1. **Detection**: `[WARN] Anomaly detected: loss=NaN`
+2. **Action**: Weights are restored from `last_good_state.pt`.
+3. **Recovery**: LR is reduced by 50% automatically.
+4. **Resumption**: Training continues from the last stable point.
+
+---
+
+## Breaking Changes
+
+### v0.2.0
+- **Log Format**: All emojis removed (sticker-style). Automated log parsers relying on emojis will need updating.
+- **Weights Loading**: `load_model` now defaults to `weights_only=True` for security.
+- **Default Callbacks**: `HistoryCallback` is now automatically added to all trainers.
