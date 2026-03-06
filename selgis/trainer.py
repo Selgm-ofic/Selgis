@@ -49,6 +49,7 @@ class Trainer:
         self.compute_metrics = compute_metrics
 
         self.device = get_device(config.device)
+        # Don't move model to device if it has hf_device_map (device_map="auto")
         if not hasattr(self.model, "hf_device_map"):
             self.model.to(self.device)
 
@@ -62,6 +63,10 @@ class Trainer:
                 weight_decay=config.weight_decay,
             )
         self.optimizer = optimizer
+
+        # CPU Offload setup warning
+        if getattr(config, "cpu_offload", False):
+            print("[INFO] CPU Offload enabled: optimizer states and gradients will be offloaded to CPU")
 
         # LR Finder
         if config.lr_finder_enabled:
@@ -226,7 +231,10 @@ class Trainer:
         Single training step: forward, loss check, backward. No optimizer step here
         (handled in _train_epoch for gradient accumulation). Returns loss or None if rollback.
         """
-        batch = move_to_device(batch, self.device)
+        # Don't move batch to device if model uses device_map="auto"
+        has_device_map = hasattr(self.model, "hf_device_map")
+        if not has_device_map:
+            batch = move_to_device(batch, self.device)
 
         with self.selgis.get_amp_context():
             loss, _ = self._forward(batch)
@@ -248,8 +256,15 @@ class Trainer:
 
         inputs, labels = unpack_batch(batch)
 
+        # If model has hf_device_map (device_map="auto"), don't move inputs
+        # The model handles device placement internally
+        has_device_map = hasattr(self.model, "hf_device_map")
+
         if is_dict_like(inputs):
             inputs_dict = dict(inputs)
+            # Move inputs to device only if model doesn't use device_map="auto"
+            if not has_device_map:
+                inputs_dict = move_to_device(inputs_dict, self.device)
             outputs = self.model(**inputs_dict)
 
             if hasattr(outputs, "loss") and outputs.loss is not None:
@@ -258,11 +273,15 @@ class Trainer:
 
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
             if labels is not None and self.criterion is not None:
+                if not has_device_map:
+                    labels = move_to_device(labels, self.device)
                 loss = self.criterion(logits, labels)
                 return loss, logits
 
             raise ValueError("Model doesn't return loss and no criterion provided")
 
+        if not has_device_map:
+            inputs = move_to_device(inputs, self.device)
         outputs = self.model(inputs)
 
         if self.criterion is None:
@@ -270,6 +289,9 @@ class Trainer:
 
         if labels is None:
             raise ValueError("Labels required for training")
+
+        if not has_device_map:
+            labels = move_to_device(labels, self.device)
 
         loss = self.criterion(outputs, labels)
         return loss, outputs
@@ -287,8 +309,13 @@ class Trainer:
         correct = 0
         total = 0
 
+        # Check if model uses device_map="auto"
+        has_device_map = hasattr(self.model, "hf_device_map")
+
         for batch in self.eval_dataloader:
-            batch = move_to_device(batch, self.device)
+            # Don't move batch to device if model uses device_map="auto"
+            if not has_device_map:
+                batch = move_to_device(batch, self.device)
 
             with self.selgis.get_amp_context():
                 loss, logits = self._forward(batch)
@@ -394,6 +421,10 @@ class TransformerTrainer(Trainer):
         param_groups = get_optimizer_grouped_params(model, config.weight_decay)
         optimizer = self._create_optimizer(param_groups, config)
 
+        # CPU Offload setup warning
+        if getattr(config, "cpu_offload", False):
+            print("[INFO] CPU Offload enabled: optimizer states and gradients will be offloaded to CPU")
+
         super().__init__(
             model=model,
             config=config,
@@ -429,7 +460,7 @@ class TransformerTrainer(Trainer):
             try:
                 from transformers import BitsAndBytesConfig
                 import torch
-                
+
                 if config.quantization_type == "8bit":
                     bnb_config = BitsAndBytesConfig(load_in_8bit=True)
                     print("[INFO] Quantization: 8-bit enabled")
@@ -447,12 +478,25 @@ class TransformerTrainer(Trainer):
             except Exception as e:
                 print(f"[WARN] Failed to configure quantization: {e}. Proceeding without it.")
 
+        # CPU Offload setup
+        cpu_offload = getattr(config, "cpu_offload", False)
+        device_map = None
+        if cpu_offload:
+            # Use device_map="auto" for automatic CPU offload with large models
+            device_map = "auto"
+            print("[INFO] CPU Offload: using device_map='auto' for memory efficiency")
+
         num_labels = config.num_labels
         trust = True
         load_kw = {
             "trust_remote_code": trust,
             "quantization_config": bnb_config
         }
+
+        # Add device_map if using CPU offload
+        if device_map is not None:
+            load_kw["device_map"] = device_map
+
         # Remove quantization_config if None (to avoid errors if not supported by all loaders)
         if bnb_config is None:
             load_kw.pop("quantization_config")
@@ -500,7 +544,14 @@ class TransformerTrainer(Trainer):
         try:
             from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
 
-            if getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False):
+            # Check if model is quantized or using CPU offload
+            is_quantized = (
+                getattr(model, "is_loaded_in_8bit", False) or
+                getattr(model, "is_loaded_in_4bit", False) or
+                hasattr(model, "hf_device_map")  # device_map="auto" implies offload
+            )
+
+            if is_quantized:
                 model = prepare_model_for_kbit_training(model)
 
             task_type_mapping = {
