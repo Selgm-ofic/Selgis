@@ -32,6 +32,7 @@ class SelgisCore:
         self.device = device
 
         self._is_peft_model = self._check_is_peft_model()
+        self._cpu_offload: bool = getattr(config, "cpu_offload", False)
 
         self._state_storage: str = getattr(config, "state_storage", "disk")
         if self._state_storage not in {"disk", "memory"}:
@@ -65,6 +66,9 @@ class SelgisCore:
         print(f"[INFO] Parameters: {trainable_params:,} trainable / {total_params:,} total  "
               f"({100 * trainable_params / total_params:.2f}%)")
 
+        if self._cpu_offload:
+            self._setup_cpu_offload()
+
         self._save_last_good_state()
 
         self._scaler = None
@@ -86,6 +90,56 @@ class SelgisCore:
         except ImportError:
             return False
 
+    def _setup_cpu_offload(self) -> None:
+        """
+        Setup CPU offload for optimizer states and gradients.
+        Moves optimizer state to CPU and registers hooks to offload gradients after backward.
+        This saves GPU VRAM at the cost of slightly slower training.
+        """
+        print("[INFO] CPU Offload enabled for optimizer states and gradients")
+
+        # Offload optimizer state to CPU
+        for param_group in self.optimizer.param_groups:
+            for param in param_group["params"]:
+                if param.requires_grad and param in self.optimizer.state:
+                    state = self.optimizer.state[param]
+                    if "exp_avg" in state:
+                        state["exp_avg"] = state["exp_avg"].to("cpu")
+                    if "exp_avg_sq" in state:
+                        state["exp_avg_sq"] = state["exp_avg_sq"].to("cpu")
+                    if "sum" in state:  # For SGD with momentum
+                        state["sum"] = state["sum"].to("cpu")
+
+        # Register backward hooks to offload gradients to CPU
+        self._offload_grad_handles: list = []
+        for param in self.model.parameters():
+            if param.requires_grad:
+                handle = param.register_post_accumulate_grad_hook(
+                    self._create_grad_offload_hook(param)
+                )
+                self._offload_grad_handles.append(handle)
+
+    def _create_grad_offload_hook(self, param: nn.Parameter):
+        """Create a hook to offload gradient to CPU after accumulation."""
+        def hook(grad: torch.Tensor) -> None:
+            if param.grad is not None:
+                param.grad = param.grad.to("cpu")
+        return hook
+
+    def _onload_grad_to_device(self) -> None:
+        """Move gradients back to device before optimizer step."""
+        if not self._cpu_offload:
+            return
+        for param in self.model.parameters():
+            if param.grad is not None and param.grad.device.type == "cpu":
+                param.grad = param.grad.to(self.device, non_blocking=True)
+
+    def _cleanup_offload_handles(self) -> None:
+        """Cleanup gradient offload hooks."""
+        for handle in self._offload_grad_handles:
+            handle.remove()
+        self._offload_grad_handles = []
+
     def _get_trainable_param_names(self) -> set[str]:
         """Return names of all trainable parameters."""
         return {
@@ -101,7 +155,7 @@ class SelgisCore:
         state = {}
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                # Используем .detach() вместо устаревшего .data
+                # Use .detach() instead of deprecated .data
                 state[name] = param.detach().cpu().clone()
         return state
 
@@ -276,6 +330,10 @@ class SelgisCore:
 
     def optimizer_step(self) -> None:
         """Optimizer step with gradient clipping and optional AMP."""
+        # Onload gradients to device if using CPU offload
+        if self._cpu_offload:
+            self._onload_grad_to_device()
+
         if self._scaler is not None:
             self._scaler.unscale_(self.optimizer)
 
@@ -292,10 +350,29 @@ class SelgisCore:
         else:
             self.optimizer.step()
 
+        # Offload optimizer state back to CPU after step
+        if self._cpu_offload:
+            self._offload_optimizer_state()
+
         self._steps_since_last_state += 1
         if self._steps_since_last_state >= max(self._state_update_interval, 1):
             self._save_last_good_state()
             self._steps_since_last_state = 0
+
+    def _offload_optimizer_state(self) -> None:
+        """Move optimizer state back to CPU after step."""
+        if not self._cpu_offload:
+            return
+        for param_group in self.optimizer.param_groups:
+            for param in param_group["params"]:
+                if param.requires_grad and param in self.optimizer.state:
+                    state = self.optimizer.state[param]
+                    if "exp_avg" in state:
+                        state["exp_avg"] = state["exp_avg"].to("cpu")
+                    if "exp_avg_sq" in state:
+                        state["exp_avg_sq"] = state["exp_avg_sq"].to("cpu")
+                    if "sum" in state:
+                        state["sum"] = state["sum"].to("cpu")
 
     def eval_epoch(
         self,
@@ -346,9 +423,18 @@ class SelgisCore:
 
     def load_best_weights(self) -> bool:
         """Load best saved weights. Returns True if loaded, False otherwise."""
+        # Cleanup offload hooks before loading weights
+        if self._cpu_offload:
+            self._cleanup_offload_handles()
+
         loaded = self._load_best_state()
         if loaded:
             print("[INFO] Best weights loaded")
+
+        # Re-setup offload if enabled
+        if self._cpu_offload:
+            self._setup_cpu_offload()
+
         return loaded
 
     def get_amp_context(self):

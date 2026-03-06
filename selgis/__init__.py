@@ -12,7 +12,7 @@ def _get_version() -> str:
         from importlib.metadata import version
         return version("selgis")
     except Exception:
-        return "0.1.0"
+        return "0.2.1"
 
 
 __version__ = _get_version()
@@ -21,6 +21,7 @@ from selgis.callbacks import (
     Callback,
     CheckpointCallback,
     EarlyStoppingCallback,
+    HistoryCallback,
     LoggingCallback,
     SparsityCallback,
     WandBCallback,
@@ -57,6 +58,7 @@ __all__ = [
     "LoggingCallback",
     "WandBCallback",
     "SparsityCallback",
+    "HistoryCallback",
     "get_device",
     "seed_everything",
     "count_parameters",

@@ -69,6 +69,7 @@ class SelgisConfig:
 
     # === Device ===
     device: str = "auto"
+    cpu_offload: bool = False  # Offload optimizer states and gradients to CPU
 
     # === Reproducibility ===
     seed: int = 42
