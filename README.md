@@ -45,7 +45,7 @@ We tested Selgis under extreme conditions on real hardware (Tesla T4 16GB). Here
 pip install selgis
 
 # Full version (with Transformers, LoRA, quantization, and WandB support)
-pip install selgis[all]
+pip install "selgis[all]"
 ```
 
 ---
@@ -77,7 +77,10 @@ config = TransformerConfig(
     
     # --- Selgis protection ---
     nan_recovery=True,      # Auto-rollback on NaN/Spike
-    state_storage="disk"    # Save RAM (store state on disk)
+    state_storage="disk",   # Save RAM (store state on disk)
+
+    # --- CPU Offload (New) ---
+    cpu_offload=True,       # Offload optimizer states/gradients to CPU
 )
 
 # Start training (Trainer handles model loading and quantization automatically)
@@ -103,7 +106,10 @@ model = torch.nn.Sequential(
 config = SelgisConfig(
     max_epochs=10,
     lr_finder_enabled=True,  # Auto-find optimal LR before start
-    spike_threshold=3.0      # Rollback if loss jumps 3x
+    spike_threshold=3.0,     # Rollback if loss jumps 3x
+
+    # --- CPU Offload (New) ---
+    cpu_offload=True,        # Offload optimizer states/gradients to CPU
 )
 
 trainer = Trainer(
