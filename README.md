@@ -45,7 +45,7 @@ We tested Selgis under extreme conditions on real hardware (Tesla T4 16GB). Here
 pip install selgis
 
 # Full version (with Transformers, LoRA, quantization, and WandB support)
-pip install "selgis[all]"
+pip install selgis[all]
 ```
 
 ---
