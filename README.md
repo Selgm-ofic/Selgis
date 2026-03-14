@@ -181,11 +181,11 @@ Selgis doesn't just prevent errors — it **returns training to a productive tra
 +-------------------------------------------------------------+
 |  Epoch 5/10  |  Step 450  |  Loss: 0.0023  |  Normal       |
 |  Epoch 5/10  |  Step 451  |  Loss: 8.7421  |  SPIKE!       |
-|                                                            |
+|                                                             |
 |  [DETECTED] Loss spike (380x above average)                |
 |  [ACTION]  Rolling back to last stable state (step 450)    |
 |  [ACTION]  Reducing LR by 50%                              |
-|                                                            |
+|                                                             |
 |  Epoch 5/10  |  Step 451  |  Loss: 0.0021  |  Recovered    |
 +-------------------------------------------------------------+
 ```
@@ -273,10 +273,10 @@ Model stuck? Loss unchanged for 5 epochs?
 ```
 +------------------------------------------------------------+
 |  Epoch 7/10  |  Loss: 0.1523  |  No improvement: 5 epochs |
-|                                                           |
+|                                                            |
 |  [FINAL SURGE TRIGGERED] factor=5.0                       |
 |  LR: 1.0e-5  ->  5.0e-5                                   |
-|                                                           |
+|                                                            |
 |  Epoch 7/10  |  Loss: 0.0847  |  IMPROVED!                |
 +------------------------------------------------------------+
 ```
@@ -615,7 +615,29 @@ Device: cuda
 GPU: NVIDIA GeForce GTX 1660 Ti
 Memory: 6.00 GB
 
-# Quick test (demo training)
+# Run complete test suite (16 tests)
+$ selgis test
+Running Selgis ML - Complete Test Suite...
+✓ Imports
+✓ Configuration
+✓ Datasets
+✓ DataLoader
+✓ Trainer
+✓ Callbacks
+✓ E2E Loss Decrease
+✓ Utils
+✓ Custom Architectures
+✓ CUDA Support
+✓ LLM Fine-tune
+✓ Pretrain Minimal
+✓ Rollback Procedure
+✓ Self-healing Procedure
+✓ Pretrain 15 Epochs
+✓ CUDA Test
+
+16/16 tests passed
+
+# Quick demo training
 $ selgis train
 
 # Train from config
@@ -625,6 +647,36 @@ $ selgis train --config lora_config.yaml
 $ selgis version
 Selgis ML v0.2.2
 ```
+
+---
+
+## Testing
+
+Selgis includes a comprehensive test suite with 16 tests covering all components:
+
+```bash
+# Run all tests (after installation)
+selgis test
+
+# Or directly
+python test_selgis.py
+
+# Or via pytest
+pytest test_selgis.py -v
+```
+
+**Test Coverage:**
+- ✅ Imports & Configuration
+- ✅ Datasets & DataLoader
+- ✅ Trainer & Callbacks
+- ✅ E2E Loss Decrease (57.9%)
+- ✅ Custom Architectures (ResNet, Transformer, CNN, LSTM)
+- ✅ CUDA Support & Mixed Precision
+- ✅ LLM Fine-tuning (LoRA)
+- ✅ Self-healing & Rollback Procedures
+- ✅ Extended Pretraining (88.9% reduction)
+
+See [TEST_REPORT.md](TEST_REPORT.md) for detailed results.
 
 ---
 
@@ -664,13 +716,14 @@ Selgis works out of the box — no hours of hyperparameter tuning needed.
 - [API Reference](API.md) — All classes and parameters
 - [API_DOCUMENTATION.md](API_DOCUMENTATION.md) — Detailed examples with comments
 - [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) — Analysis and competitor comparison
+- [TEST_REPORT.md](TEST_REPORT.md) — Complete test results (16/16 passed)
 
 ---
 
 ## Community
 
-- **GitHub:** https://github.com/Selgm-ofic/Selgis-ML
-- **PyPI:** https://pypi.org/manage/project/selgis/releases
+- **GitHub:** https://github.com/selgis/selgis
+- **PyPI:** https://pypi.org/project/selgis/
 - **Issues & PRs:** Welcome!
 
 ---
@@ -698,4 +751,3 @@ Selgis stands on the shoulders of giants:
 If you find this project useful, consider starring it on GitHub!
 
 </div>
-

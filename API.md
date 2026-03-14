@@ -1,527 +1,1612 @@
+# Selgis ML Library - Complete API Documentation
 
-# SELGIS API Reference
-
-**Version:** 0.2.1 (Stable)
-**Python:** 3.10+
-
-SELGIS is a universal training framework for PyTorch and HuggingFace Transformers. It provides training protection (NaN/loss spike recovery, rollback), learning-rate scheduling, LR finder, callbacks, and specialized support for quantization (4-bit/8-bit) and PEFT/LoRA.
-
----
-
-## OpenAPI 3.0 Specification (CLI)
-
-SELGIS exposes its main functionality via a CLI that follows a structured schema. Below is a conceptual OpenAPI representation of the training endpoint.
-
-```yaml
-openapi: 3.0.0
-info:
-  title: SELGIS CLI Training API
-  version: 0.2.1
-  description: API for managing ML training runs via CLI.
-paths:
-  /train:
-    post:
-      summary: Start a training run
-      description: Initiates a training process with a specified configuration.
-      parameters:
-        - name: config
-          in: query
-          required: false
-          schema:
-            type: string
-          description: Path to a YAML or JSON configuration file.
-      responses:
-        '200':
-          description: Training completed successfully.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrainingMetrics'
-        '400':
-          description: Invalid configuration parameters.
-        '500':
-          description: Training failed due to hardware or logic error.
-
-components:
-  schemas:
-    TrainingMetrics:
-      type: object
-      properties:
-        train_loss:
-          type: number
-        eval_loss:
-          type: number
-        accuracy:
-          type: number
-        epoch:
-          type: integer
-```
-
----
-
-## Authentication & Security
-
-### HuggingFace Hub
-When using `TransformerTrainer.push_to_hub()`, SELGIS uses the standard HuggingFace authentication token.
-
-**Setup:**
-```bash
-huggingface-cli login
-```
-Alternatively, set the `HUGGING_FACE_HUB_TOKEN` environment variable.
-
-### Weight Security
-SELGIS prioritizes security when loading external checkpoints.
-- **`weights_only=True`**: (Default in `load_model`) Prevents arbitrary code execution by loading only tensors.
-- **Breaking Change (v0.2.0)**: In PyTorch < 2.0, where `weights_only` is not supported, a `[WARN]` is issued, and a standard load is performed. Only use trusted checkpoints in legacy environments.
-
----
-
-## Multi-Language Examples
-
-### Python (Standard API)
-```python
-from selgis import TransformerConfig, TransformerTrainer
-
-config = TransformerConfig(
-    model_name_or_path="facebook/opt-125m",
-    quantization_type="4bit",
-    use_peft=True
-)
-trainer = TransformerTrainer(model_or_path=config.model_name_or_path, config=config, ...)
-trainer.train()
-```
-
-### Bash (CLI)
-```bash
-# Basic training
-selgis train
-
-# Training with custom config
-selgis train --config ./my_config.yaml
-
-# Check device availability
-selgis device
-```
-
-### Node.js (via Child Process)
-```javascript
-const { exec } = require('child_process');
-
-exec('selgis train --config custom.json', (error, stdout, stderr) => {
-  if (error) {
-    console.error(`Error: ${error.message}`);
-    return;
-  }
-  console.log(`Output: ${stdout}`);
-});
-```
+**Version:** 0.2.2  
+**Description:** Universal Training Framework for PyTorch and HuggingFace Transformers
 
 ---
 
 ## Table of Contents
 
-1. [Installation & CLI](#installation--cli)
-2. [Package overview](#package-overview)
-3. [Config](#config)
-4. [Core](#core)
-5. [Trainers](#trainers)
+1. [Installation](#installation)
+2. [Quick Start](#quick-start)
+3. [Configuration](#configuration)
+4. [Datasets](#datasets)
+5. [Training](#training)
 6. [Callbacks](#callbacks)
-7. [Scheduler](#scheduler)
-8. [LR Finder](#lr-finder)
-9. [Utils](#utils)
+7. [Utilities](#utilities)
+8. [Advanced Features](#advanced-features)
+9. [Complete Examples](#complete-examples)
+10. [CLI](#cli-command-line-interface)
+11. [Error Handling & Troubleshooting](#error-handling--troubleshooting)
+12. [Security & Breaking Changes](#security--breaking-changes)
+13. [License & Support](#license--support)
 
 ---
 
-## Installation & CLI
-
-Install in development mode:
+## Installation
 
 ```bash
-pip install -e .
-```
+# Basic installation
+pip install selgis
 
-Optional extras:
+# With all dependencies
+pip install selgis[all]
 
-```bash
-pip install -e ".[transformers,peft]"
-```
-
-**CLI** (entry point `selgis`):
-
-| Command | Description |
-|--------|-------------|
-| `selgis --version` | Print package version |
-| `selgis version` | Same as `--version` |
-| `selgis device` | Print compute device (CUDA/MPS/CPU) and GPU info |
-| `selgis train` | Run minimal synthetic demo training |
-| `selgis train --config PATH` | Run training with configuration from YAML/JSON file |
-
-Example:
-
-```bash
-selgis device
-selgis train
+# Specific components
+pip install selgis[transformers]  # HuggingFace support
+pip install selgis[peft]          # LoRA/PEFT support
+pip install selgis[llm]           # LLM training (4-bit/8-bit)
+pip install selgis[tracking]      # Weights & Biases
 ```
 
 ---
 
-## Package overview
+## Quick Start
 
-**Public API** (import from `selgis`):
+### Basic Training Example
 
 ```python
-from selgis import (
-    __version__,
-    SelgisConfig,
-    TransformerConfig,
-    SelgisCore,
-    LRFinder,
-    SmartScheduler,
-    get_transformer_scheduler,
-    Trainer,
-    TransformerTrainer,
-    Callback,
-    EarlyStoppingCallback,
-    CheckpointCallback,
-    LoggingCallback,
-    WandBCallback,
-    SparsityCallback,
-    get_device,
-    seed_everything,
-    count_parameters,
-    format_params,
-    move_to_device,
-    unpack_batch,
-    get_optimizer_grouped_params,
-    is_dict_like,
-    to_dict,
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from selgis import Trainer, SelgisConfig
+
+# Create a simple model
+model = nn.Sequential(
+    nn.Linear(10, 32),
+    nn.ReLU(),
+    nn.Linear(32, 2),
+)
+
+# Create dataset
+X = torch.randn(1000, 10)
+y = torch.randint(0, 2, (1000,))
+dataset = TensorDataset(X, y)
+loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+# Configure training
+config = SelgisConfig(
+    max_epochs=10,
+    batch_size=32,
+    lr_finder_enabled=True,
+    fp16=False,
+)
+
+# Create trainer and train
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    eval_dataloader=loader,
+    criterion=nn.CrossEntropyLoss(),
+)
+
+trainer.train()
+```
+
+### Transformer Fine-tuning Example
+
+```python
+from transformers import AutoTokenizer
+from selgis import TransformerTrainer, TransformerConfig, create_dataloaders, DatasetConfig
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+# Configure dataset
+dataset_config = DatasetConfig(
+    data_type="text",
+    data_path="./data.jsonl",
+    tokenizer=tokenizer,
+    max_length=512,
+    batch_size=32,
+)
+
+train_loader, eval_loader = create_dataloaders(dataset_config)
+
+# Configure Transformer training
+config = TransformerConfig(
+    model_name_or_path="bert-base-uncased",
+    use_peft=True,
+    peft_config={
+        "r": 8,
+        "lora_alpha": 16,
+        "lora_dropout": 0.05,
+        "target_modules": ["query", "value"],
+    },
+    learning_rate=2e-5,
+    max_epochs=3,
+)
+
+# Train
+trainer = TransformerTrainer(
+    model_or_path="bert-base-uncased",
+    config=config,
+    train_dataloader=train_loader,
+    eval_dataloader=eval_loader,
+)
+
+trainer.train()
+```
+
+---
+
+## Configuration
+
+### SelgisConfig
+
+Base training configuration dataclass.
+
+```python
+from selgis import SelgisConfig
+
+config = SelgisConfig(
+    # Training
+    batch_size=32,
+    eval_batch_size=64,
+    max_epochs=100,
+    gradient_accumulation_steps=1,
+    
+    # Early Stopping
+    patience=5,
+    min_delta=1e-4,
+    
+    # Gradient
+    grad_clip_norm=1.0,
+    grad_clip_value=None,
+    
+    # Anomaly Detection
+    spike_threshold=3.0,
+    min_history_len=10,
+    nan_recovery=True,
+    
+    # LR Finder
+    lr_finder_enabled=True,
+    lr_finder_trainable_only=False,
+    lr_finder_start=1e-7,
+    lr_finder_end=1.0,
+    lr_finder_steps=100,
+    
+    # Scheduler
+    warmup_epochs=0,
+    warmup_ratio=0.0,
+    min_lr=1e-7,
+    scheduler_type="cosine_restart",  # cosine, cosine_restart, linear, constant, polynomial
+    t_0=10,
+    t_mult=2,
+    
+    # Regularization
+    label_smoothing=0.1,
+    weight_decay=0.01,
+    sparsity_enabled=False,
+    sparsity_target=0.0,
+    sparsity_start_epoch=0,
+    sparsity_frequency=1,
+    
+    # Mixed Precision
+    fp16=False,
+    bf16=False,
+    
+    # Logging
+    logging_steps=10,
+    eval_steps=None,
+    save_steps=None,
+    
+    # Checkpointing
+    output_dir="./output",
+    save_total_limit=3,
+    save_best_only=True,
+    state_storage="disk",  # disk, memory
+    state_dir=None,
+    state_update_interval=100,
+    
+    # Device
+    device="auto",  # auto, cuda, cpu, mps
+    cpu_offload=False,
+    
+    # Reproducibility
+    seed=42,
 )
 ```
 
-**Note:** When using models loaded with `device_map="auto"` (e.g. large LLMs), the trainer does not move the model to a single device; each part stays on its mapped device. If no `eval_dataloader` is provided, `evaluate()` returns an empty dict and primary metric for early stopping defaults to `"loss"` with `higher_is_better=False`. Early stopping: SelgisCore uses `config.patience` and primary metric; if you add `EarlyStoppingCallback`, it runs in addition (callback's `should_stop` is checked after SelgisCore).
+#### Parameters
 
-**Scheduler and warmup:** Use either `warmup_epochs` (epoch-based) or `warmup_ratio` (step-based), not both. When `warmup_ratio` > 0, the trainer calls `scheduler.step()` on every optimizer step; when `warmup_ratio` is 0, it calls `scheduler.step_epoch(epoch)` at the end of each epoch.
-
-**Safe checkpoint loading:** For untrusted checkpoint files, use `trainer.load_model(path, weights_only=True)` (default). This loads only tensors and avoids arbitrary code execution. PyTorch 2.0+ supports `weights_only=True`; older versions fall back to full load.
-
----
-
-## Config
-
-### `SelgisConfig`
-
-Base training configuration (dataclass).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
 | `batch_size` | int | 32 | Training batch size |
 | `eval_batch_size` | int | 64 | Evaluation batch size |
-| `max_epochs` | int | 100 | Maximum epochs |
-| `gradient_accumulation_steps` | int | 1 | Gradient accumulation steps |
-| `patience` | int | 5 | Early stopping patience (epochs without improvement) |
-| `min_delta` | float | 1e-4 | Minimum improvement to count as better |
-| `grad_clip_norm` | float | 1.0 | Max gradient L2 norm (0 = no clip) |
-| `grad_clip_value` | float \| None | None | Optional per-parameter clip value |
-| `spike_threshold` | float | 3.0 | Loss spike = value > threshold × recent average |
-| `min_history_len` | int | 10 | Min loss history length before spike check |
-| `nan_recovery` | bool | True | Enable NaN/Inf and spike rollback |
-| `lr_finder_enabled` | bool | True | Run LR finder before training |
-| `lr_finder_trainable_only` | bool | False | LR finder: clone/restore only trainable params (saves memory for LoRA/LLM) |
-| `lr_finder_start` | float | 1e-7 | LR finder start LR |
-| `lr_finder_end` | float | 1.0 | LR finder end LR |
-| `lr_finder_steps` | int | 100 | LR finder steps |
-| `warmup_epochs` | int | 0 | Warmup epochs (use with step_epoch scheduler) |
-| `warmup_ratio` | float | 0.0 | Warmup as fraction of total steps |
-| `min_lr` | float | 1e-7 | Minimum LR for schedulers |
-| `scheduler_type` | str | `"cosine_restart"` | One of: cosine, cosine_restart, linear, constant, polynomial |
-| `t_0` | int | 10 | First restart period (cosine_restart) |
-| `t_mult` | int | 2 | Period multiplier after each restart |
-| `label_smoothing` | float | 0.1 | Label smoothing (if used in criterion) |
-| `weight_decay` | float | 0.01 | Weight decay for optimizer |
-| `sparsity_enabled` | bool | False | Enable SparsityCallback from config |
-| `sparsity_target` | float | 0.0 | Target sparsity (0–1) |
-| `sparsity_start_epoch` | int | 0 | Epoch to start pruning |
-| `sparsity_frequency` | int | 1 | Prune every N epochs |
-| `fp16` | bool | False | Use FP16 mixed precision (CUDA) |
-| `bf16` | bool | False | Use BF16 mixed precision |
-| `logging_steps` | int | 10 | Log every N steps |
-| `eval_steps` | int \| None | None | Eval every N steps (if used) |
-| `save_steps` | int \| None | None | Save every N steps (if used) |
-| `output_dir` | str | `"./output"` | Default output directory |
-| `save_total_limit` | int | 3 | Max checkpoints to keep |
-| `save_best_only` | bool | True | Save only best checkpoint |
-| `state_storage` | `"disk" \| "memory"` | `"disk"` | Where to store rollback/best state |
-| `state_dir` | str \| None | None | Override directory for state (default: output_dir/selgis_state) |
-| `state_update_interval` | int | 100 | Steps between saving "last good" state |
-| `device` | str | `"auto"` | Device: auto, cuda, cpu, mps |
-| `cpu_offload` | bool | `False` | Offload optimizer states and gradients to CPU (saves VRAM) |
-| `seed` | int | 42 | Random seed |
+| `max_epochs` | int | 100 | Maximum number of training epochs |
+| `gradient_accumulation_steps` | int | 1 | Steps for gradient accumulation |
+| `patience` | int | 5 | Epochs to wait before early stopping triggers |
+| `min_delta` | float | 1e-4 | Minimum change in metric to qualify as improvement |
+| `final_surge_factor` | float | 5.0 | LR multiplier for final surge before early stopping (set to 0 to disable). When training stalls, this gives the model one last chance to improve by temporarily increasing the learning rate. |
+| `grad_clip_norm` | float | 1.0 | Maximum gradient norm for clipping |
+| `grad_clip_value` | float | None | Maximum gradient value for clipping |
+| `spike_threshold` | float | 3.0 | Loss spike detection threshold (multiplier). If current loss exceeds this factor times the running average, it's flagged as a spike. |
+| `min_history_len` | int | 10 | Minimum history length for spike detection. Ensures enough data points before anomaly detection activates. |
+| `nan_recovery` | bool | True | Enable automatic recovery from NaN/Inf loss. When enabled, the trainer will attempt to restore previous good state and reduce LR. |
+| `lr_finder_enabled` | bool | True | Enable learning rate finder at training start. Automatically searches for optimal initial LR. |
+| `lr_finder_trainable_only` | bool | False | Only tune trainable parameters during LR search. Saves memory for large/LoRA models. |
+| `lr_finder_start` | float | 1e-7 | Starting LR for finder search. |
+| `lr_finder_end` | float | 1.0 | Ending LR for finder search. |
+| `lr_finder_steps` | int | 100 | Number of steps for LR search. More steps = finer granularity. |
+| `warmup_epochs` | int | 0 | Number of warmup epochs. LR linearly increases from 0 to initial_lr during warmup. |
+| `warmup_ratio` | float | 0.0 | Warmup ratio of total training steps. Alternative to warmup_epochs (use one or the other). |
+| `min_lr` | float | 1e-7 | Minimum learning rate. LR will never go below this value during scheduling. |
+| `scheduler_type` | str | "cosine_restart" | LR scheduler type: `cosine` (smooth decay), `cosine_restart` (with restarts), `linear` (linear decay), `constant` (no decay), `polynomial` (power-law decay). |
+| `t_0` | int | 10 | Initial period for cosine restart scheduler (in epochs). After t_0 epochs, the cycle restarts. |
+| `t_mult` | int | 2 | Period multiplier for cosine restart. After each restart, the period is multiplied by t_mult. |
+| `label_smoothing` | float | 0.1 | Label smoothing factor. Reduces overconfidence by smoothing target labels (0 = no smoothing, 1 = uniform). |
+| `weight_decay` | float | 0.01 | Weight decay (L2 regularization) for optimizer. Helps prevent overfitting. |
+| `fp16` | bool | False | Enable FP16 mixed precision. Reduces memory usage and can speed up training on NVIDIA GPUs. |
+| `bf16` | bool | False | Enable BF16 mixed precision. Better for training stability on Ampere+ GPUs (A100, RTX 30xx+). |
+| `logging_steps` | int | 10 | Log training metrics every N steps. Lower values give finer-grained logs but increase output. |
+| `output_dir` | str | "./output" | Output directory for checkpoints and training state. |
+| `save_total_limit` | int | 3 | Maximum number of checkpoints to keep. Older checkpoints are automatically deleted. |
+| `save_best_only` | bool | True | Save only the best checkpoint (based on eval metric). Set False to save all epochs. |
+| `state_storage` | str | "disk" | State storage mode: `disk` (saves RAM, slower) or `memory` (faster, uses more RAM). Used for rollback on NaN/Inf. |
+| `device` | str | "auto" | Device selection: `auto` (cuda > mps > cpu), `cuda`, `cpu`, `mps`. |
+| `cpu_offload` | bool | False | Offload optimizer states and gradients to CPU. Reduces GPU VRAM usage by ~30-40% at slight speed cost. |
+| `seed` | int | 42 | Random seed for reproducibility. Sets seeds for random, numpy, and torch. |
 
-**Validation:** `fp16` and `bf16` cannot both be True. Either `warmup_epochs` or `warmup_ratio` can be non-zero, not both.
+### TransformerConfig
 
----
+Extended configuration for HuggingFace Transformers.
 
-### `TransformerConfig`
+```python
+from selgis import TransformerConfig
 
-Extends `SelgisConfig` for HuggingFace models.
+config = TransformerConfig(
+    # Inherited from SelgisConfig (all parameters above)
+    
+    # Model
+    model_name_or_path="bert-base-uncased",
+    num_labels=2,
+    problem_type="single_label_classification",
+    
+    # Tokenizer
+    max_length=512,
+    padding="max_length",
+    truncation=True,
+    
+    # Optimizer
+    optimizer_type="adamw",  # adamw, adam, sgd, adafactor
+    learning_rate=2e-5,
+    adam_beta1=0.9,
+    adam_beta2=0.999,
+    adam_epsilon=1e-8,
+    
+    # LoRA / PEFT
+    use_peft=False,
+    peft_config={
+        "r": 8,
+        "lora_alpha": 16,
+        "lora_dropout": 0.05,
+        "target_modules": ["query", "value"],
+        "bias": "none",
+        "task_type": "SEQ_CLS",
+    },
+    
+    # Gradient Checkpointing
+    gradient_checkpointing=False,
+    
+    # Quantization
+    quantization_type="no",  # no, 8bit, 4bit
+    bnb_4bit_compute_dtype="float16",
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=False,
+)
+```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `model_name_or_path` | str | `""` | Pretrained model name or path |
-| `num_labels` | int | 2 | Number of labels (classification) |
-| `problem_type` | str | `"single_label_classification"` | single_label_classification, multi_label_classification, regression, seq2seq, causal_lm, masked_lm |
-| `max_length` | int | 512 | Max sequence length |
-| `padding` | str | `"max_length"` | max_length, longest, do_not_pad |
-| `truncation` | bool | True | Truncate to max_length |
-| `optimizer_type` | str | `"adamw"` | adamw, adam, sgd, adafactor |
-| `learning_rate` | float | 2e-5 | Learning rate |
-| `adam_beta1` | float | 0.9 | Adam/AdamW beta1 |
-| `adam_beta2` | float | 0.999 | Adam/AdamW beta2 |
-| `adam_epsilon` | float | 1e-8 | Adam/AdamW epsilon |
-| `use_peft` | bool | False | Apply PEFT (e.g. LoRA) |
-| `peft_config` | dict | {} | PEFT config (e.g. LoraConfig kwargs) |
-| `gradient_checkpointing` | bool | False | Enable gradient checkpointing |
-| `deepspeed_config` | str \| None | None | Path to DeepSpeed config |
-| `quantization_type` | `"no" \| "8bit" \| "4bit"` | `"no"` | BitsAndBytes quantization strategy |
-| `bnb_4bit_compute_dtype` | `"float16" \| "bfloat16" \| "float32"` | `"float16"` | Compute dtype for 4-bit |
-| `bnb_4bit_quant_type` | `"fp4" \| "nf4"` | `"nf4"` | 4-bit quantization type |
-| `bnb_4bit_use_double_quant` | bool | False | Use nested quantization for 4-bit |
+#### TransformerConfig Parameters
 
----
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model_name_or_path` | str | "" | Model name or path to load from HuggingFace Hub or local directory. |
+| `num_labels` | int | 2 | Number of labels for classification tasks. Ignored for causal_lm. |
+| `problem_type` | str | "single_label_classification" | Task type: `single_label_classification`, `multi_label_classification`, `regression`, `seq2seq`, `causal_lm`, `masked_lm`. |
+| `max_length` | int | 512 | Maximum sequence length. Longer sequences are truncated. |
+| `padding` | str | "max_length" | Padding strategy: `max_length` (pad to max_length), `longest` (pad to longest in batch), `do_not_pad`. |
+| `truncation` | bool | True | Truncate sequences longer than max_length. |
+| `optimizer_type` | str | "adamw" | Optimizer type: `adamw` (recommended), `adam`, `sgd`, `adafactor`. |
+| `learning_rate` | float | 2e-5 | Initial learning rate. Use LR Finder for optimal value. |
+| `adam_beta1` | float | 0.9 | AdamW beta1 parameter (exponential decay rate for first moment). |
+| `adam_beta2` | float | 0.999 | AdamW beta2 parameter (exponential decay rate for second moment). |
+| `adam_epsilon` | float | 1e-8 | AdamW epsilon parameter (numerical stability). |
+| `use_peft` | bool | False | Enable PEFT/LoRA for parameter-efficient fine-tuning. |
+| `peft_config` | dict | {} | LoRA configuration: `r` (rank), `lora_alpha` (scaling), `lora_dropout`, `target_modules`, `bias`, `task_type`. |
+| `gradient_checkpointing` | bool | False | Enable gradient checkpointing. Reduces memory by ~40% at slight speed cost. |
+| `quantization_type` | str | "no" | Quantization type: `no`, `8bit`, `4bit`. Use 4bit for consumer GPUs. |
+| `bnb_4bit_compute_dtype` | str | "float16" | Compute dtype for 4-bit quantization: `float16`, `bfloat16` (recommended for Ampere+). |
+| `bnb_4bit_quant_type` | str | "nf4" | Quantization type: `nf4` (Normal Float 4, better for weights) or `fp4`. |
+| `bnb_4bit_use_double_quant` | bool | False | Enable double quantization. Saves ~0.4 bits/parameter. |
 
-## Core
+#### LoRA PEFT Configuration
 
-### `SelgisCore(model, optimizer, scheduler, config, device)`
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `r` | int | 8 | LoRA rank. Higher = more parameters, better quality. Common: 8, 16, 32. |
+| `lora_alpha` | int | 16 | LoRA alpha scaling. Typically 2 * r. |
+| `lora_dropout` | float | 0.05 | Dropout for LoRA layers. |
+| `target_modules` | list | [] | Modules to apply LoRA to. For LLM: `["q_proj", "v_proj"]` or `["query", "value"]`. |
+| `bias` | str | "none" | Which biases to train: `none`, `all`, `lora_only`. |
+| `task_type` | str | None | Task type for PEFT: `SEQ_CLS` (classification), `CAUSAL_LM`, `SEQ_2_SEQ_LM`, etc. |
 
-Training protection and optimization: NaN/Inf and loss-spike detection, rollback to last good state, early stopping with optional "final surge", gradient clipping, mixed precision, memory-efficient state handling (trainable parameters only; important for LoRA/PEFT), and **CPU Offload** for optimizer states and gradients.
+#### Problem Types
 
-**CPU Offload:** When `config.cpu_offload=True`, the optimizer states (e.g., Adam's exp_avg, exp_avg_sq) and gradients are offloaded to CPU after each step, reducing GPU VRAM usage at the cost of slight speed overhead. This is especially useful for large models on consumer GPUs.
-
-**Methods:**
-
-- **`check_loss(loss: Tensor) -> bool`**  
-  Check loss for NaN/Inf or spike. Returns `True` if OK, `False` if rollback was performed.
-
-- **`backward_step(loss, retain_graph=False)`**  
-  Backward pass (with optional AMP). Clipping is done in `optimizer_step`.
-
-- **`optimizer_step()`**  
-  Gradient clipping (norm and optionally value), then optimizer step; periodically saves “last good” state.
-
-- **`eval_epoch(metrics, epoch, primary_metric="accuracy", higher_is_better=True) -> Literal["IMPROVED","SURGE","STOP","CONTINUE"]`**  
-  Update scheduler, compare primary metric and loss to best; save best state if improved. Returns `IMPROVED`, `SURGE` (one final LR surge), `STOP`, or `CONTINUE`.
-
-- **`load_best_weights() -> bool`**  
-  Load best saved weights. Returns `True` if loaded.
-
-- **`get_amp_context()`**  
-  Returns `torch.amp.autocast(...)` context if fp16/bf16, else `nullcontext()`.
-
-**Properties:** `best_metric`, `best_loss`, `trainable_params_count`, `total_params_count`.
-
----
-
-## Trainers
-
-### `Trainer(model, config, train_dataloader, eval_dataloader=None, criterion=None, optimizer=None, callbacks=None, forward_fn=None, compute_metrics=None)`
-
-Generic trainer for any PyTorch model.
-
-- **model:** `nn.Module` to train.
-- **config:** `SelgisConfig`.
-- **train_dataloader / eval_dataloader:** `DataLoader` instances.
-- **criterion:** Loss module (e.g. `CrossEntropyLoss`). Optional if model returns `loss` (e.g. HuggingFace).
-- **optimizer:** Optional; created by default (AdamW, lr from LR finder or 1e-3).
-- **callbacks:** List of `Callback`; default `[LoggingCallback()]`. `SparsityCallback` is added automatically if `config.sparsity_enabled` is True.
-- **forward_fn:** Optional `(model, batch) -> (loss, logits)`. If None, forward is inferred from batch (dict vs tensor) and criterion.
-- **compute_metrics:** Optional `(preds, labels) -> dict[str, float]`. If None, accuracy is computed when possible.
-
-**Methods:**
-
-- **`train() -> dict[str, Any]`**  
-  Run full training loop; returns final metrics.
-
-- **`evaluate() -> dict[str, float]`**  
-  Run evaluation; returns metrics (e.g. loss, accuracy).
-
-- **`save_model(path)`**  
-  Save `model.state_dict()` to path.
-
-- **`load_model(path)`**  
-  Load `state_dict` from path.
-
-**Attributes:** `model`, `config`, `device`, `optimizer`, `selgis` (SelgisCore), `callbacks`, `train_dataloader`, `eval_dataloader`.
+| Problem Type | Description |
+|--------------|-------------|
+| `single_label_classification` | Single label classification |
+| `multi_label_classification` | Multi-label classification |
+| `regression` | Regression task |
+| `seq2seq` | Sequence-to-sequence (T5, BART) |
+| `causal_lm` | Causal language modeling (GPT) |
+| `masked_lm` | Masked language modeling (BERT) |
 
 ---
 
-### `TransformerTrainer(model_or_path, config, train_dataloader, eval_dataloader=None, tokenizer=None, **kwargs)`
+## Datasets
 
-Trainer for HuggingFace Transformers: loads model from path if string, applies PEFT from config, gradient checkpointing, and grouped params for weight decay.
+### DatasetConfig
 
-- **model_or_path:** Model instance or pretrained model name/path.
-- **config:** `TransformerConfig`.
-- **tokenizer:** Optional; used for `save_pretrained` / `push_to_hub`.
+Configuration for creating datasets.
 
-**Methods (in addition to Trainer):**
+```python
+from selgis import DatasetConfig
 
-- **`save_pretrained(path)`**  
-  Save model (and tokenizer) in HuggingFace format; for PEFT, saves adapters only.
+config = DatasetConfig(
+    # Data Type
+    data_type="text",  # text, image, multimodal, custom, streaming, tabular
+    
+    # Paths
+    data_path="./data.jsonl",
+    train_path="./train.jsonl",
+    eval_path="./eval.jsonl",
+    
+    # For Multimodal/Tabular
+    image_path="./images",
+    image_column="image",
+    text_column="text",
+    label_column="label",
+    
+    # Loading Parameters
+    batch_size=32,
+    eval_batch_size=64,
+    num_workers=0,
+    prefetch_factor=None,
+    pin_memory=True,
+    persistent_workers=False,
+    
+    # Tokenization / Transforms
+    tokenizer=None,
+    image_processor=None,
+    transform=None,
+    format_fn=None,
+    
+    # Caching
+    cache_dir="./cache",
+    use_cache=True,
+    pre_tokenize=False,
+    pre_compute_features=False,
+    
+    # Streaming
+    streaming=False,
+    buffer_size=1000,
+    
+    # Data Split
+    train_split=0.9,
+    seed=42,
+    
+    # Distributed Training
+    world_size=1,
+    rank=0,
+    
+    # Additional
+    max_length=512,
+    custom_kwargs={},
+)
+```
 
-- **`push_to_hub(repo_id, **kwargs)`**  
-  Push model and tokenizer to HuggingFace Hub.
+### create_dataset
+
+Create a dataset from configuration.
+
+```python
+from selgis import create_dataset, DatasetConfig
+
+config = DatasetConfig(
+    data_type="text",
+    data_path="./data.jsonl",
+    tokenizer=tokenizer,
+    max_length=512,
+)
+
+dataset = create_dataset(config)
+```
+
+### create_dataloaders
+
+Create train and eval DataLoaders.
+
+```python
+from selgis import create_dataloaders, DatasetConfig
+
+config = DatasetConfig(
+    data_type="text",
+    data_path="./data.jsonl",
+    tokenizer=tokenizer,
+    batch_size=32,
+    num_workers=4,
+)
+
+train_loader, eval_loader = create_dataloaders(config)
+
+print(f"Train batches: {len(train_loader)}")
+print(f"Eval batches: {len(eval_loader)}")
+```
+
+### TextDataset
+
+Dataset for text data with optimized loading.
+
+```python
+from selgis import TextDataset
+
+dataset = TextDataset(
+    data_path="./data/dialogues.jsonl",
+    tokenizer=tokenizer,
+    max_length=512,
+    cache_dir="./cache",
+    pre_tokenize=True,
+    use_mmap=True,  # Memory-mapped file for fast access
+)
+
+print(f"Dataset size: {len(dataset)}")
+print(f"Stats: {dataset.get_stats()}")
+```
+
+#### Features
+
+- **Memory-mapped files** for fast lazy loading
+- **Pre-tokenization** with disk caching
+- **Dialogue formatting** for LLM fine-tuning
+- **Performance metrics** tracking
+
+### HFTextDataset
+
+Dataset from HuggingFace datasets with auto-caching.
+
+```python
+from selgis import HFTextDataset
+
+dataset = HFTextDataset(
+    dataset_name="tatsu-lab/alpaca",
+    tokenizer=tokenizer,
+    max_length=512,
+    cache_dir="./cache",
+    streaming=False,
+    text_column="instruction",
+)
+```
+
+#### Features
+
+- **Automatic caching** of tokenized data
+- **Batched tokenization** (10x faster)
+- **Streaming support** for large datasets
+- **HuggingFace Hub integration**
+
+### ImageDataset
+
+Dataset for image classification.
+
+```python
+from torchvision import transforms
+from selgis import ImageDataset
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.485, 0.485], std=[0.229, 0.229, 0.229]),
+])
+
+dataset = ImageDataset(
+    data_path="./data/imagenet",
+    transform=transform,
+    file_format="folder",  # folder, csv, json
+)
+
+print(f"Classes: {dataset._class_names}")
+print(f"Samples: {len(dataset)}")
+```
+
+#### Folder Structure
+
+```
+data/imagenet/
+├── class_0/
+│   ├── img1.jpg
+│   └── img2.jpg
+├── class_1/
+│   ├── img3.jpg
+│   └── img4.jpg
+└── ...
+```
+
+### MultimodalDataset
+
+Dataset for text + image data (LLaVA, BLIP style).
+
+```python
+from transformers import AutoTokenizer, AutoImageProcessor
+from selgis import MultimodalDataset
+
+tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-1.5-7b-hf")
+image_processor = AutoImageProcessor.from_pretrained("llava-hf/llava-1.5-7b-hf")
+
+dataset = MultimodalDataset(
+    data_path="./data/llava_dataset.jsonl",
+    tokenizer=tokenizer,
+    image_processor=image_processor,
+    max_length=512,
+    image_root="./data/images",
+)
+
+# Sample format in JSONL:
+# {"image": "img1.jpg", "question": "What is this?", "answer": "A cat"}
+```
+
+### StreamingTextDataset
+
+Streaming dataset for large files (>100GB).
+
+```python
+from selgis import StreamingTextDataset
+
+dataset = StreamingTextDataset(
+    data_path="./data/huge_dataset.jsonl",
+    tokenizer=tokenizer,
+    max_length=512,
+    buffer_size=1000,
+)
+
+# Works with DataLoader and num_workers
+loader = DataLoader(dataset, batch_size=32, num_workers=4)
+```
+
+#### Features
+
+- **No RAM loading** - reads line by line
+- **Multi-worker support** with data partitioning
+- **Compressed file support** (.gz, .zip)
+- **Automatic file handle management**
+
+### CustomDataset
+
+Wrapper for custom PyTorch datasets.
+
+```python
+from torch.utils.data import Dataset
+from selgis import CustomDataset
+
+class MyDataset(Dataset):
+    def __init__(self):
+        self.data = [...]
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        return {
+            "inputs": torch.tensor(self.data[idx]),
+            "labels": torch.tensor(self.target[idx]),
+        }
+
+# Wrap for Selgis
+custom_dataset = CustomDataset(
+    dataset=MyDataset(),
+    wrap_key="inputs",
+    label_key="labels",
+)
+```
+
+---
+
+## Training
+
+### Trainer
+
+Universal trainer for PyTorch models.
+
+```python
+from selgis import Trainer, SelgisConfig
+
+# Create trainer
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=train_loader,
+    eval_dataloader=eval_loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=None,  # Auto-created if None
+    callbacks=None,  # Auto-created: Logging, History, Checkpoint
+    forward_fn=None,  # Custom forward function
+    compute_metrics=None,  # Custom metrics function
+)
+
+# Train
+metrics = trainer.train()
+
+# Save model
+trainer.save_model("./model.pt")
+
+# Load model
+trainer.load_model("./model.pt")
+```
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `model` | nn.Module | Model to train |
+| `config` | SelgisConfig | Training configuration |
+| `train_dataloader` | DataLoader | Training data loader |
+| `eval_dataloader` | DataLoader | Evaluation data loader |
+| `criterion` | nn.Module | Loss function |
+| `optimizer` | Optimizer | Optimizer (auto-created if None) |
+| `callbacks` | List[Callback] | List of callbacks |
+| `forward_fn` | Callable | Custom forward: (model, batch) -> (loss, logits) |
+| `compute_metrics` | Callable | Custom metrics: (preds, labels) -> dict |
+
+#### Custom Forward Function
+
+```python
+def forward_fn(model, batch):
+    inputs = batch["input_ids"]
+    labels = batch["labels"]
+    
+    outputs = model(inputs)
+    loss = nn.CrossEntropyLoss()(outputs, labels)
+    
+    return loss, outputs
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    forward_fn=forward_fn,
+)
+```
+
+#### Custom Metrics
+
+```python
+def compute_metrics(preds, labels):
+    preds = preds.argmax(dim=-1)
+    accuracy = (preds == labels).float().mean().item()
+    return {"accuracy": accuracy}
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    compute_metrics=compute_metrics,
+)
+```
+
+### TransformerTrainer
+
+Trainer for HuggingFace Transformers with LoRA/PEFT support.
+
+```python
+from selgis import TransformerTrainer, TransformerConfig
+
+config = TransformerConfig(
+    model_name_or_path="bert-base-uncased",
+    use_peft=True,
+    peft_config={
+        "r": 8,
+        "lora_alpha": 16,
+        "target_modules": ["query", "value"],
+    },
+    quantization_type="4bit",
+    learning_rate=2e-5,
+)
+
+trainer = TransformerTrainer(
+    model_or_path="bert-base-uncased",
+    config=config,
+    train_dataloader=train_loader,
+    eval_dataloader=eval_loader,
+    tokenizer=tokenizer,
+)
+
+trainer.train()
+
+# Save model
+trainer.save_pretrained("./saved_model")
+
+# Push to HuggingFace Hub
+trainer.push_to_hub("username/my-model")
+```
+
+#### Features
+
+- **Automatic model loading** from path or HuggingFace Hub
+- **PEFT/LoRA** for parameter-efficient fine-tuning
+- **4-bit/8-bit quantization** via BitsAndBytes
+- **Gradient checkpointing** for memory efficiency
+- **Push to Hub** for easy sharing
 
 ---
 
 ## Callbacks
 
-Base: **`Callback`** — abstract base with hooks: `on_train_begin`, `on_train_end`, `on_epoch_begin`, `on_epoch_end`, `on_step_begin`, `on_step_end`, `on_evaluate`. Override as needed.
+### Callback (Base Class)
 
-### `EarlyStoppingCallback(patience=5, min_delta=1e-4, metric="loss", mode="min")`
+Base class for all callbacks.
 
-Stops training when `metric` does not improve for `patience` epochs. `mode`: `"min"` or `"max"`. Expose `should_stop` for trainer to break.
+```python
+from selgis import Callback
 
-### `CheckpointCallback(output_dir, save_best_only=True, save_total_limit=3, metric="loss", mode="min")`
+class MyCallback(Callback):
+    def on_train_begin(self, trainer):
+        print("Training started!")
+    
+    def on_epoch_begin(self, trainer, epoch):
+        print(f"Epoch {epoch} starting...")
+    
+    def on_epoch_end(self, trainer, epoch, metrics):
+        print(f"Epoch {epoch} completed: {metrics}")
+    
+    def on_step_begin(self, trainer, step):
+        pass
+    
+    def on_step_end(self, trainer, step, loss):
+        if step % 100 == 0:
+            print(f"Step {step}: loss={loss:.4f}")
+    
+    def on_evaluate(self, trainer, metrics):
+        print(f"Evaluation: {metrics}")
+    
+    def on_train_end(self, trainer):
+        print("Training completed!")
+```
 
-Saves checkpoints (trainable state_dict, optimizer, metrics) per epoch; keeps best and up to `save_total_limit` others.
+### LoggingCallback
 
-### `HistoryCallback(output_dir="./output")`
+Console logging for training progress.
 
-**New in v0.2.0.** Automatically added by `Trainer`. Saves `training_history.json` on training end.
+```python
+from selgis import LoggingCallback
 
-**JSON Structure:**
+callback = LoggingCallback(log_every=10)
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    callbacks=[callback],
+)
+```
+
+#### Output Example
+
+```
+----------------------------------------
+[INFO] Training started
+----------------------------------------
+  Step     10 | Loss: 0.6893 | LR: 1.00e-03
+  Step     20 | Loss: 0.6471 | LR: 1.00e-03
+[INFO] Epoch 0 | train_loss: 0.6949 | loss: 0.6818 | accuracy: 50.5000
+----------------------------------------
+[INFO] Training complete
+----------------------------------------
+```
+
+### EarlyStoppingCallback
+
+Early stopping based on a metric.
+
+```python
+from selgis import EarlyStoppingCallback
+
+callback = EarlyStoppingCallback(
+    patience=5,
+    min_delta=1e-4,
+    metric="loss",
+    mode="min",  # min for loss, max for accuracy
+)
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    callbacks=[callback],
+)
+```
+
+### CheckpointCallback
+
+Save model checkpoints during training.
+
+```python
+from selgis import CheckpointCallback
+
+callback = CheckpointCallback(
+    output_dir="./checkpoints",
+    save_best_only=True,
+    save_total_limit=3,
+    metric="loss",
+    mode="min",
+)
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    callbacks=[callback],
+)
+```
+
+#### Checkpoint Structure
+
+```
+checkpoints/
+├── best_model/
+│   ├── model.pt
+│   ├── optimizer.pt
+│   └── metrics.json
+├── checkpoint-epoch-0/
+│   ├── model.pt
+│   ├── optimizer.pt
+│   └── metrics.json
+└── checkpoint-epoch-1/
+    └── ...
+```
+
+### HistoryCallback
+
+Save training history to JSON.
+
+```python
+from selgis import HistoryCallback
+
+callback = HistoryCallback(output_dir="./output")
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    callbacks=[callback],
+)
+
+trainer.train()
+
+# Access history
+history = callback.history
+for record in history:
+    print(f"Epoch {record['epoch']}: loss={record['metrics']['loss']:.4f}")
+```
+
+#### Output JSON Structure
+
 ```json
 {
-  "config": { ... },
-  "model_type": "...",
+  "config": {...},
+  "model_type": "Sequential",
+  "total_epochs": 10,
+  "final_metrics": {"loss": 0.2873, "accuracy": 91.0},
   "history": [
-    { "epoch": 0, "metrics": { "loss": 0.5, "accuracy": 85.0 } },
-    ...
-  ],
-  "final_metrics": { ... }
+    {"epoch": 0, "global_step": 10, "metrics": {"loss": 0.6818}},
+    {"epoch": 1, "global_step": 20, "metrics": {"loss": 0.6628}}
+  ]
 }
 ```
 
-### `LoggingCallback(log_every=10)`
+### WandBCallback
 
-**Redesigned in v0.2.0.** Minimalist style.
-- `[INFO]`: General progress.
-- `[WARN]`: Non-critical issues (e.g. missing bitsandbytes).
-- `[SAVE]`: File saving events.
+Weights & Biases integration.
 
-Logs step loss/LR every `log_every` steps and epoch metrics at end of epoch.
+```python
+from selgis import WandBCallback
 
-### `WandBCallback(project, name=None, config=None)`
+callback = WandBCallback(
+    project="my-project",
+    name="experiment-1",
+    config={"lr": 1e-3, "batch_size": 32},
+)
 
-Logs to Weights & Biases (step loss, epoch metrics). Requires `wandb`.
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    callbacks=[callback],
+)
+```
 
-### `SparsityCallback(target_sparsity=0.5, start_epoch=0, frequency=1, skip_lora=True, min_params_to_prune=1000, log_details=False)`
+### SparsityCallback
 
-Magnitude pruning per layer (trainable only; optionally skip LoRA). Applies every `frequency` epochs starting at `start_epoch`.  
-**Methods:** `get_layer_sparsity(model) -> dict[str, float]` — per-layer sparsity.
+Magnitude pruning for model sparsity.
 
----
+```python
+from selgis import SparsityCallback
 
-## Scheduler
+callback = SparsityCallback(
+    target_sparsity=0.5,
+    start_epoch=5,
+    frequency=1,
+    skip_lora=True,
+    min_params_to_prune=1000,
+)
 
-### `SmartScheduler(optimizer, initial_lr, config, num_training_steps=None)`
-
-Epoch- or step-based LR schedule: warmup (ratio or epochs), then cosine/cosine_restart/linear/constant/polynomial.
-
-**Methods:**
-
-- **`step_epoch(epoch) -> float`**  
-  Update LR by epoch; returns new LR.
-
-- **`step() -> float`**  
-  Update LR by step (when `num_training_steps` and warmup_ratio used); returns new LR.
-
-- **`reduce_lr(factor=0.5) -> float`**  
-  Reduce current LR by factor (e.g. after rollback).
-
-- **`surge_lr(factor=3.0) -> float`**  
-  Increase LR (e.g. final surge).
-
-- **`get_lr() -> float`**  
-  Current learning rate.
-
-### `get_transformer_scheduler(optimizer, scheduler_type, num_warmup_steps, num_training_steps)`
-
-Returns a HuggingFace-style scheduler (requires `transformers`).
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    callbacks=[callback],
+)
+```
 
 ---
 
-## LR Finder
+## Utilities
 
-### `LRFinder(model, optimizer, criterion=None, device=None)`
+### Device Management
 
-Finds a good learning rate by exponentially sweeping LR and choosing a point near steepest descent. Works with any model (including HuggingFace); `criterion` can be None if model returns `loss`.
+```python
+from selgis import get_device
 
-**Method:**
+# Auto-select best device
+device = get_device("auto")  # cuda > mps > cpu
 
-- **`find(train_loader, forward_fn=None, start_lr=1e-7, end_lr=1.0, num_steps=100, smooth_f=0.05, diverge_th=4.0) -> float`**  
-  Runs sweep, restores initial state, returns suggested LR.  
-  **forward_fn:** Optional `(model, batch) -> (loss, logits)`.
+# Force specific device
+device = get_device("cuda")
+device = get_device("cpu")
+device = get_device("mps")
+```
 
-**Property:** `history -> dict` with `"lrs"` and `"losses"` for plotting.
+#### Output
+
+```
+[INFO] Device: cuda
+   GPU: NVIDIA GeForce GTX 1660 Ti
+   Memory: 6.00 GB
+```
+
+### Seeding
+
+```python
+from selgis import seed_everything
+
+seed_everything(42)  # Sets seeds for random, numpy, torch
+```
+
+### Parameter Counting
+
+```python
+from selgis import count_parameters, format_params
+
+model = MyModel()
+
+# Count parameters
+trainable = count_parameters(model, trainable_only=True)
+total = count_parameters(model, trainable_only=False)
+
+# Format for display
+print(f"Trainable: {format_params(trainable)}")  # e.g., "1.2M"
+print(f"Total: {format_params(total)}")  # e.g., "3.4B"
+```
+
+### Batch Utilities
+
+```python
+from selgis import move_to_device, unpack_batch, is_dict_like, to_dict
+
+# Move batch to device
+batch = move_to_device(batch, device)
+
+# Unpack batch
+inputs, labels = unpack_batch(batch)
+
+# Check if dict-like
+if is_dict_like(inputs):
+    inputs_dict = to_dict(inputs)
+```
+
+### Optimizer Parameter Groups
+
+```python
+from selgis import get_optimizer_grouped_params
+
+# Create parameter groups with weight decay exclusion
+param_groups = get_optimizer_grouped_params(
+    model,
+    weight_decay=0.01,
+    no_decay_keywords=("bias", "LayerNorm", "layer_norm"),
+)
+
+optimizer = torch.optim.AdamW(param_groups, lr=1e-3)
+```
 
 ---
 
-## Utils
+## Advanced Features
 
-- **`__version__`**: Current library version.
-- **`get_device(preference="auto") -> torch.device`**  
-  Resolves device: auto (cuda/mps/cpu), cuda, cpu, mps. Prints device and GPU info.
+### SelgisCore
 
-- **`seed_everything(seed: int)`**  
-  Sets random seed for Python, NumPy, and PyTorch (and CUDA if available).
+Low-level training protection and optimization core.
 
-- **`count_parameters(model, trainable_only=True) -> int`**  
-  Counts parameters (optionally trainable only).
+```python
+from selgis import SelgisCore, SelgisConfig, SmartScheduler
+import torch.optim as optim
 
-- **`format_params(num: int) -> str`**  
-  Formats count (e.g. `"1.2M"`, `"3.4B"`).
+# Create components
+model = MyModel()
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+scheduler = SmartScheduler(optimizer, initial_lr=1e-3, config=config)
+device = torch.device("cuda")
 
-- **`is_dict_like(obj) -> bool`**  
-  True if obj is dict-like (e.g. BatchEncoding).
+# Create core
+core = SelgisCore(
+    model=model,
+    optimizer=optimizer,
+    scheduler=scheduler,
+    config=config,
+    device=device,
+)
 
-- **`to_dict(obj) -> dict`**  
-  Converts dict-like to plain dict.
+# Training loop
+for epoch in range(config.max_epochs):
+    for batch in dataloader:
+        loss = compute_loss(model, batch)
+        
+        # Check for anomalies
+        if not core.check_loss(loss):
+            continue  # Rollback triggered
+        
+        # Backward pass
+        core.backward_step(loss)
+        
+        # Optimizer step
+        core.optimizer_step()
+```
 
-- **`move_to_device(batch, device, non_blocking=True)`**  
-  Recursively moves batch (dict, tuple, list, tensor) to device.
+#### Features
 
-- **`unpack_batch(batch) -> (inputs, labels)`**  
-  Unpacks batch into inputs and labels (supports dict with `labels`/`label`, (inputs, labels) tuple, or single tensor).
+- **NaN/Inf detection** with automatic rollback
+- **Loss spike detection** based on history
+- **Gradient clipping** (norm and value)
+- **Mixed precision** support (FP16/BF16)
+- **CPU offload** for optimizer states
+- **Memory-efficient** state management
 
-- **`get_optimizer_grouped_params(model, weight_decay, no_decay_keywords=("bias", "LayerNorm", "layer_norm")) -> list[dict]`**  
-  Returns param groups for optimizer (decay vs no-decay).
+### LRFinder
+
+Learning rate finder using Leslie Smith's method.
+
+```python
+from selgis import LRFinder
+import torch.optim as optim
+
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+
+lr_finder = LRFinder(
+    model=model,
+    optimizer=optimizer,
+    criterion=nn.CrossEntropyLoss(),
+    device=torch.device("cuda"),
+    trainable_only=False,  # Save memory for LoRA models
+)
+
+optimal_lr = lr_finder.find(
+    train_loader=train_loader,
+    start_lr=1e-7,
+    end_lr=1.0,
+    num_steps=100,
+)
+
+print(f"Optimal LR: {optimal_lr:.2e}")
+
+# Plot results (using matplotlib)
+import matplotlib.pyplot as plt
+history = lr_finder.history
+plt.plot(history["lrs"], history["losses"])
+plt.xscale("log")
+plt.xlabel("Learning Rate")
+plt.ylabel("Loss")
+plt.show()
+```
+
+### SmartScheduler
+
+Learning rate scheduler with warmup and restarts.
+
+```python
+from selgis import SmartScheduler, SelgisConfig
+import torch.optim as optim
+
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+
+config = SelgisConfig(
+    scheduler_type="cosine_restart",
+    warmup_ratio=0.1,
+    min_lr=1e-7,
+    t_0=10,
+    t_mult=2,
+)
+
+scheduler = SmartScheduler(
+    optimizer=optimizer,
+    initial_lr=1e-3,
+    config=config,
+    num_training_steps=10000,
+)
+
+# Step-based (for warmup_ratio > 0)
+for step in range(10000):
+    train_step()
+    scheduler.step()
+
+# Or epoch-based (for warmup_epochs > 0)
+for epoch in range(max_epochs):
+    train_epoch()
+    scheduler.step_epoch(epoch)
+
+# Manual adjustment
+scheduler.reduce_lr(factor=0.5)  # Reduce by 50%
+scheduler.surge_lr(factor=3.0)   # Increase by 3x
+```
+
+#### Scheduler Types
+
+| Type | Description |
+|------|-------------|
+| `cosine` | Cosine annealing |
+| `cosine_restart` | Cosine with restarts (SGDR) |
+| `linear` | Linear decay |
+| `constant` | Constant LR |
+| `polynomial` | Polynomial decay |
+
+### CPU Offload
+
+Offload optimizer states and gradients to CPU.
+
+```python
+from selgis import SelgisConfig
+
+config = SelgisConfig(
+    cpu_offload=True,
+    fp16=True,
+)
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+)
+```
+
+#### Benefits
+
+- **Reduced GPU memory** usage (up to 40%)
+- **Larger batch sizes** possible
+- **Trade-off:** Slightly slower training
+
+### Mixed Precision Training
+
+```python
+from selgis import SelgisConfig
+
+# FP16 (faster on NVIDIA GPUs)
+config = SelgisConfig(fp16=True, bf16=False)
+
+# BF16 (better for stability, requires Ampere+)
+config = SelgisConfig(fp16=False, bf16=True)
+
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+)
+```
+
+### Gradient Accumulation
+
+```python
+from selgis import SelgisConfig
+
+# Effective batch size = 32 * 4 = 128
+config = SelgisConfig(
+    batch_size=32,
+    gradient_accumulation_steps=4,
+)
+```
 
 ---
 
-## Error Handling & Exceptions
+## Complete Examples
 
-SELGIS uses structured exceptions and logging to handle common ML issues.
+### Example 1: Text Classification with BERT
+
+```python
+from transformers import AutoTokenizer
+from selgis import (
+    TransformerTrainer,
+    TransformerConfig,
+    create_dataloaders,
+    DatasetConfig,
+)
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
+# Configure dataset
+dataset_config = DatasetConfig(
+    data_type="text",
+    data_path="./data/imdb.jsonl",
+    tokenizer=tokenizer,
+    max_length=256,
+    batch_size=32,
+    num_workers=4,
+)
+
+train_loader, eval_loader = create_dataloaders(dataset_config)
+
+# Configure training
+config = TransformerConfig(
+    model_name_or_path="bert-base-uncased",
+    num_labels=2,
+    problem_type="single_label_classification",
+    use_peft=True,
+    peft_config={
+        "r": 8,
+        "lora_alpha": 16,
+        "target_modules": ["query", "value"],
+    },
+    learning_rate=2e-5,
+    max_epochs=3,
+    fp16=True,
+)
+
+# Train
+trainer = TransformerTrainer(
+    model_or_path="bert-base-uncased",
+    config=config,
+    train_dataloader=train_loader,
+    eval_dataloader=eval_loader,
+    tokenizer=tokenizer,
+)
+
+trainer.train()
+trainer.save_pretrained("./bert-imdb")
+```
+
+### Example 2: Custom Architecture Training
+
+```python
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from selgis import Trainer, SelgisConfig
+
+# Define model
+class ResNetLike(nn.Module):
+    def __init__(self, input_dim=20, hidden_dim=64, num_classes=10):
+        super().__init__()
+        self.stem = nn.Linear(input_dim, hidden_dim)
+        self.block1 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.head = nn.Linear(hidden_dim, num_classes)
+    
+    def forward(self, inputs, **kwargs):
+        x = torch.relu(self.stem(inputs))
+        x = self.block1(x) + x  # Residual connection
+        return self.head(x)
+
+# Create data
+X = torch.randn(1000, 20)
+y = torch.randint(0, 10, (1000,))
+dataset = TensorDataset(X, y)
+loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+# Configure
+config = SelgisConfig(
+    max_epochs=10,
+    batch_size=32,
+    lr_finder_enabled=True,
+    fp16=False,
+)
+
+# Train
+model = ResNetLike(input_dim=20, num_classes=10)
+trainer = Trainer(
+    model=model,
+    config=config,
+    train_dataloader=loader,
+    eval_dataloader=loader,
+    criterion=nn.CrossEntropyLoss(),
+)
+
+metrics = trainer.train()
+print(f"Final metrics: {metrics}")
+```
+
+### Example 3: LLM Fine-tuning with QLoRA
+
+```python
+from transformers import AutoTokenizer
+from selgis import TransformerTrainer, TransformerConfig
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+
+# Configure for 4-bit QLoRA
+config = TransformerConfig(
+    model_name_or_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    use_peft=True,
+    peft_config={
+        "r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "target_modules": ["q_proj", "v_proj"],
+        "task_type": "CAUSAL_LM",
+    },
+    quantization_type="4bit",
+    bnb_4bit_compute_dtype="float16",
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    learning_rate=2e-4,
+    max_epochs=1,
+    gradient_accumulation_steps=4,
+    gradient_checkpointing=True,
+)
+
+# Create dataloaders
+dataset_config = DatasetConfig(
+    data_type="text",
+    data_path="./data/alpaca.jsonl",
+    tokenizer=tokenizer,
+    max_length=512,
+    batch_size=2,
+)
+
+train_loader, eval_loader = create_dataloaders(dataset_config)
+
+# Define forward for causal LM
+def forward_fn(model, batch):
+    input_ids = batch["input_ids"]
+    labels = batch["labels"]
+    
+    outputs = model(input_ids=input_ids, labels=labels)
+    return outputs.loss, outputs.logits
+
+# Train
+trainer = TransformerTrainer(
+    model_or_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    config=config,
+    train_dataloader=train_loader,
+    eval_dataloader=eval_loader,
+    tokenizer=tokenizer,
+    forward_fn=forward_fn,
+)
+
+trainer.train()
+trainer.save_pretrained("./llama-finetuned")
+```
+
+---
+
+## CLI (Command Line Interface)
+
+Selgis includes a CLI for diagnostics and quick execution.
+
+```bash
+# Check device availability
+selgis device
+
+# Run demo training
+selgis train
+
+# Run training with config file
+selgis train --config ./my_config.yaml
+
+# Check version
+selgis version
+```
+
+### CLI Output Example
+
+```bash
+$ selgis device
+🚀 Device: cuda
+   GPU: NVIDIA GeForce GTX 1660 Ti
+   Memory: 6.00 GB
+```
+
+---
+
+## Error Handling & Troubleshooting
+
+### Automatic Rollback (Self-Healing)
+
+When `nan_recovery=True` (default), Selgis monitors training for anomalies:
+
+1. **Detection**: `[WARN] Rollback triggered: NaN/Inf loss detected`
+2. **Action**: Weights restored from last stable state
+3. **Recovery**: Learning rate reduced by 50%
+4. **Resumption**: Training continues from stable point
+
+```python
+from selgis import SelgisConfig
+
+config = SelgisConfig(
+    nan_recovery=True,       # Auto-rollback on NaN/Spike
+    spike_threshold=3.0,     # Rollback if loss jumps 3x
+    min_history_len=10,      # History length for spike detection
+    state_storage="disk",    # Save RAM by storing state on disk
+)
+```
+
+---
 
 ### Common Exceptions
-| Exception | Trigger | Recommended Action |
-|-----------|---------|-------------------|
-| `ImportError` | Missing `transformers`, `peft`, or `bitsandbytes`. | Install via `pip install selgis[all]`. |
-| `ValueError` | Conflicting config (e.g. `fp16=True` & `bf16=True`). | Correct the configuration file/object. |
-| `ZeroDivisionError` | Model has no trainable parameters. | Ensure LoRA is correctly applied or layers are unfrozen. |
 
-### Training Protection (Rollback)
-If `nan_recovery=True` (default), SELGIS monitors loss for anomalies.
-1. **Detection**: `[WARN] Anomaly detected: loss=NaN`
-2. **Action**: Weights are restored from `last_good_state.pt`.
-3. **Recovery**: LR is reduced by 50% automatically.
-4. **Resumption**: Training continues from the last stable point.
+| Exception | Trigger | Solution |
+|-----------|---------|----------|
+| `ImportError` | Missing `transformers`, `peft`, or `bitsandbytes` | `pip install selgis[all]` |
+| `ValueError` | Conflicting config (e.g., `fp16=True` & `bf16=True`) | Fix configuration |
+| `ZeroDivisionError` | Model has no trainable parameters | Unfreeze layers or fix LoRA |
+| `FileNotFoundError` | Data path doesn't exist | Check file paths |
+| `RuntimeError` | CUDA out of memory | Reduce batch size or enable `cpu_offload` |
 
 ---
 
-## Breaking Changes
+### Troubleshooting Guide
 
-### v0.2.0
-- **Log Format**: All emojis removed (sticker-style). Automated log parsers relying on emojis will need updating.
-- **Weights Loading**: `load_model` now defaults to `weights_only=True` for security.
-- **Default Callbacks**: `HistoryCallback` is now automatically added to all trainers.
+#### Out of Memory (OOM)
+
+| Solution | Code | Memory Savings |
+|----------|------|----------------|
+| Reduce batch size | `config = SelgisConfig(batch_size=8)` | ~20-50% |
+| Gradient accumulation | `gradient_accumulation_steps=4` | ~50% |
+| CPU offload | `cpu_offload=True` | ~40% |
+| 4-bit quantization | `quantization_type="4bit"` | ~60-70% |
+| Mixed precision | `fp16=True` | ~30-50% |
+
+**Recommended combination for LLMs:**
+```python
+config = TransformerConfig(
+    batch_size=2,
+    gradient_accumulation_steps=8,  # Effective: 16
+    cpu_offload=True,
+    quantization_type="4bit",
+    fp16=True,
+)
+```
+
+#### Slow Training
+
+| Problem | Solution | Expected Speedup |
+|---------|----------|------------------|
+| Slow data loading | `num_workers=4` | 2-3x |
+| Tokenization bottleneck | `pre_tokenize=True` | 5-10x |
+| Large file I/O | `use_mmap=True` | 2-5x |
+| Memory pressure | `state_storage="memory"` | 10-20% |
+| Gradient checkpointing | Enable only if OOM | Trade-off |
+
+```python
+# Optimized for speed
+config = DatasetConfig(
+    num_workers=4,
+    prefetch_factor=2,
+    pre_tokenize=True,
+    cache_dir="./cache",
+)
+
+dataset = TextDataset(data_path="./data.jsonl", use_mmap=True)
+```
+
+#### Non-converging Model
+
+| Symptom | Solution |
+|---------|----------|
+| Loss oscillates | Reduce LR, increase warmup |
+| Loss stuck | Use LR finder, increase LR |
+| Accuracy plateaus | Final surge, check data quality |
+| Spikes frequent | Increase `spike_threshold`, enable clipping |
+
+```python
+config = SelgisConfig(
+    lr_finder_enabled=True,      # Find optimal LR
+    warmup_ratio=0.1,            # Gradual warmup
+    grad_clip_norm=1.0,          # Prevent explosions
+    scheduler_type="cosine",     # Smooth decay
+    nan_recovery=True,           # Auto-recovery
+)
+```
+
+#### Loss Spikes
+
+| Severity | Solution |
+|----------|----------|
+| Micro-spikes (1.5-2x) | Increase `min_history_len` |
+| Medium spikes (2-5x) | Increase `spike_threshold` |
+| Large spikes (5x+) | Reduce LR, check data quality |
+
+```python
+config = SelgisConfig(
+    spike_threshold=5.0,       # Default: 3.0
+    min_history_len=20,        # Default: 10
+    grad_clip_norm=0.5,        # Stricter clipping
+    scheduler_type="cosine",   # Smoother than cosine_restart
+)
+```
+
+---
+
+## Security & Breaking Changes
+
+### Security Considerations
+
+#### Checkpoint Loading
+
+```python
+# Safe loading (default) - PyTorch >= 2.0
+trainer.load_model("./checkpoint.pt", weights_only=True)
+
+# For PyTorch < 2.0 (warning issued)
+trainer.load_model("./checkpoint.pt", weights_only=False)  # Only trusted files!
+```
+
+#### HuggingFace Hub Authentication
+
+```bash
+# Login required for push_to_hub
+huggingface-cli login
+
+# Or set environment variable
+export HUGGING_FACE_HUB_TOKEN=your_token_here
+```
+
+---
+
+### Breaking Changes
+
+#### v0.2.0
+
+| Change | Description | Migration |
+|--------|-------------|-----------|
+| **Log Format** | Emojis removed from logs | Update parsers if relying on emojis |
+| **Weights Loading** | `load_model` defaults to `weights_only=True` | Use trusted checkpoints only |
+| **HistoryCallback** | Automatically added to all trainers | No action needed |
+
+---
+
+## License
+
+Apache 2.0 License - Free for commercial and research use.
+
+## Support
+
+- **Documentation:** [API_DOCUMENTATION.md](API_DOCUMENTATION.md)
+- **API Reference:** [API.md](API.md)
+- **Test Report:** [full_test_report.md](full_test_report.md)
+- **GitHub Issues:** For bugs and feature requests
+
+## Citation
+
+If you use Selgis in your research, please cite:
+
+```bibtex
+@software{selgis2026,
+  title = {Selgis ML: Self-Healing Training Framework},
+  author = {Selgis AI},
+  year = {2026},
+  version = {0.2.2},
+  url = {https://github.com/selgis/selgis}
+}
+```
