@@ -1,20 +1,27 @@
 """SELGIS core: training protection and optimization."""
 import warnings
+from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
+
 import torch
 import torch.nn as nn
+
 from selgis.config import SelgisConfig
 from selgis.scheduler import SmartScheduler
 
 
 class SelgisCore:
-    """
-    Training protection and optimization core.
-    Features: NaN/Inf and loss spike protection, automatic rollback on anomalies,
-    early stopping with final surge, gradient clipping, memory-efficient state
-    management (trainable parameters only).
+    """Training protection and optimization core.
+
+    Features: NaN/Inf and loss spike protection, automatic rollback
+    on anomalies, early stopping with final surge, gradient clipping,
+    memory-efficient state management (trainable parameters only),
+    and optional CPU offload for optimizer states and gradients.
+
+    The caller is responsible for invoking ``optimizer.zero_grad()``
+    before each ``backward_step`` call.
     """
 
     def __init__(
@@ -44,8 +51,9 @@ class SelgisCore:
             self._state_dir = Path(base_dir) / "selgis_state"
             self._state_dir.mkdir(parents=True, exist_ok=True)
 
-        self._loss_history: list[float] = []
-        self._max_loss_history: int = max(self.config.min_history_len * 10, 1000)
+        self._loss_history: deque[float] = deque(
+            maxlen=max(self.config.min_history_len * 10, 1000),
+        )
         self._best_metric = float("-inf")
         self._best_loss = float("inf")
         self._best_state: Optional[Union[dict, str]] = None
@@ -58,13 +66,21 @@ class SelgisCore:
             100,
         )
         self._steps_since_last_state: int = 0
+        self._offload_grad_handles: list = []
 
-        self._trainable_param_names: set[str] = self._get_trainable_param_names()
+        self._trainable_param_names: set[str] = (
+            self._get_trainable_param_names()
+        )
 
         total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[INFO] Parameters: {trainable_params:,} trainable / {total_params:,} total  "
-              f"({100 * trainable_params / total_params:.2f}%)")
+        trainable_params = sum(
+            p.numel() for p in model.parameters() if p.requires_grad
+        )
+        print(
+            f"[INFO] Parameters: {trainable_params:,} trainable / "
+            f"{total_params:,} total "
+            f"({100 * trainable_params / total_params:.2f}%)"
+        )
 
         if self._cpu_offload:
             self._setup_cpu_offload()
@@ -86,56 +102,84 @@ class SelgisCore:
         """Return True if the model is a PEFT (e.g. LoRA) model."""
         try:
             from peft import PeftModel
+
             return isinstance(self.model, PeftModel)
         except ImportError:
             return False
 
     def _setup_cpu_offload(self) -> None:
-        """
-        Setup CPU offload for optimizer states and gradients.
-        Moves optimizer state to CPU and registers hooks to offload gradients after backward.
-        This saves GPU VRAM at the cost of slightly slower training.
-        """
-        print("[INFO] CPU Offload enabled for optimizer states and gradients")
+        """Set up CPU offload hooks for gradients.
 
-        # Offload optimizer state to CPU
-        for param_group in self.optimizer.param_groups:
-            for param in param_group["params"]:
-                if param.requires_grad and param in self.optimizer.state:
-                    state = self.optimizer.state[param]
-                    if "exp_avg" in state:
-                        state["exp_avg"] = state["exp_avg"].to("cpu")
-                    if "exp_avg_sq" in state:
-                        state["exp_avg_sq"] = state["exp_avg_sq"].to("cpu")
-                    if "sum" in state:  # For SGD with momentum
-                        state["sum"] = state["sum"].to("cpu")
-
-        # Register backward hooks to offload gradients to CPU
-        self._offload_grad_handles: list = []
+        Optimizer state offload is handled lazily after each optimizer
+        step, because optimizer states use lazy initialization and are
+        empty until the first ``optimizer.step()`` call.
+        """
+        print(
+            "[INFO] CPU Offload enabled for optimizer states and gradients"
+        )
+        self._offload_grad_handles = []
         for param in self.model.parameters():
             if param.requires_grad:
                 handle = param.register_post_accumulate_grad_hook(
-                    self._create_grad_offload_hook(param)
+                    self._grad_offload_hook,
                 )
                 self._offload_grad_handles.append(handle)
 
-    def _create_grad_offload_hook(self, param: nn.Parameter):
-        """Create a hook to offload gradient to CPU after accumulation."""
-        def hook(grad: torch.Tensor) -> None:
-            if param.grad is not None:
-                param.grad = param.grad.to("cpu")
-        return hook
+    @staticmethod
+    def _grad_offload_hook(param: torch.Tensor) -> None:
+        """Move gradient to CPU after accumulation."""
+        if param.grad is not None:
+            param.grad = param.grad.to("cpu")
 
-    def _onload_grad_to_device(self) -> None:
-        """Move gradients back to device before optimizer step."""
+    def _onload_grads_to_device(self) -> None:
+        """Move all gradients back to their parameter's device."""
         if not self._cpu_offload:
             return
         for param in self.model.parameters():
-            if param.grad is not None and param.grad.device.type == "cpu":
-                param.grad = param.grad.to(self.device, non_blocking=True)
+            if (
+                param.grad is not None
+                and param.grad.device != param.device
+            ):
+                param.grad = param.grad.to(param.device)
+
+    def _onload_optimizer_state_to_device(self) -> None:
+        """Move optimizer state tensors to compute device before step."""
+        if not self._cpu_offload:
+            return
+        for param_group in self.optimizer.param_groups:
+            for param in param_group["params"]:
+                if not param.requires_grad:
+                    continue
+                if param not in self.optimizer.state:
+                    continue
+                state = self.optimizer.state[param]
+                for key, val in state.items():
+                    if (
+                        isinstance(val, torch.Tensor)
+                        and val.device != param.device
+                    ):
+                        state[key] = val.to(param.device)
+
+    def _offload_optimizer_state(self) -> None:
+        """Move all optimizer state tensors to CPU after step."""
+        if not self._cpu_offload:
+            return
+        for param_group in self.optimizer.param_groups:
+            for param in param_group["params"]:
+                if not param.requires_grad:
+                    continue
+                if param not in self.optimizer.state:
+                    continue
+                state = self.optimizer.state[param]
+                for key, val in state.items():
+                    if (
+                        isinstance(val, torch.Tensor)
+                        and val.device.type != "cpu"
+                    ):
+                        state[key] = val.to("cpu")
 
     def _cleanup_offload_handles(self) -> None:
-        """Cleanup gradient offload hooks."""
+        """Remove gradient offload hooks."""
         for handle in self._offload_grad_handles:
             handle.remove()
         self._offload_grad_handles = []
@@ -143,43 +187,63 @@ class SelgisCore:
     def _get_trainable_param_names(self) -> set[str]:
         """Return names of all trainable parameters."""
         return {
-            name for name, param in self.model.named_parameters()
+            name
+            for name, param in self.model.named_parameters()
             if param.requires_grad
         }
 
     def _clone_trainable_state(self) -> dict:
-        """
-        Clone only trainable parameters to CPU. Critical for LoRA/PEFT where
-        most weights are frozen; saves ~0.1% of params instead of full model.
+        """Clone only trainable parameters to CPU.
+
+        For LoRA/PEFT models where most weights are frozen this saves
+        significant memory by skipping frozen base model weights.
+        When a parameter already resides on CPU ``clone`` is used;
+        otherwise ``cpu`` already produces an independent copy.
         """
         state = {}
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                # Use .detach() instead of deprecated .data
-                state[name] = param.detach().cpu().clone()
+                if param.device.type == "cpu":
+                    state[name] = param.detach().clone()
+                else:
+                    state[name] = param.detach().cpu()
         return state
 
     def _load_trainable_state(self, state: dict) -> None:
-        """
-        Load only trainable parameters from state dict with BITWISE PRECISION.
+        """Load only trainable parameters from *state* with bitwise precision.
+
+        Uses ``copy_`` which handles cross-device transfers natively
+        without creating intermediate tensors.
         """
         current_state = self.model.state_dict()
         trainable_names = self._trainable_param_names
 
         missing_in_model = [k for k in state if k not in current_state]
-        missing_in_state = [k for k in trainable_names if k not in state]
+        missing_in_state = [
+            k for k in trainable_names if k not in state
+        ]
 
         if missing_in_model:
             warnings.warn(
-                f"SelgisCore: state has keys not in model (ignored): {missing_in_model[:5]}"
-                + (f" ... and {len(missing_in_model) - 5} more" if len(missing_in_model) > 5 else ""),
+                "SelgisCore: state has keys not in model (ignored): "
+                f"{missing_in_model[:5]}"
+                + (
+                    f" ... and {len(missing_in_model) - 5} more"
+                    if len(missing_in_model) > 5
+                    else ""
+                ),
                 UserWarning,
                 stacklevel=2,
             )
         if missing_in_state:
             warnings.warn(
-                f"SelgisCore: model has trainable keys not in state (will keep current): {missing_in_state[:5]}"
-                + (f" ... and {len(missing_in_state) - 5} more" if len(missing_in_state) > 5 else ""),
+                "SelgisCore: model has trainable keys not in state "
+                f"(will keep current): {missing_in_state[:5]}"
+                + (
+                    f" ... and {len(missing_in_state) - 5} more"
+                    if len(missing_in_state) > 5
+                    else ""
+                ),
                 UserWarning,
                 stacklevel=2,
             )
@@ -187,7 +251,7 @@ class SelgisCore:
         with torch.no_grad():
             for name, param in self.model.named_parameters():
                 if name in state and param.requires_grad:
-                    param.data.copy_(state[name].to(param.device, non_blocking=False))
+                    param.data.copy_(state[name])
 
     def _save_last_good_state(self) -> None:
         """Save last stable model state (trainable params only)."""
@@ -209,12 +273,16 @@ class SelgisCore:
             return
 
         if self._state_storage == "memory":
-            self._load_trainable_state(self._last_good_state)  # type: ignore[arg-type]
+            self._load_trainable_state(self._last_good_state)
             return
 
         state_path = Path(self._last_good_state)
         if state_path.is_file():
-            state_dict = torch.load(state_path, map_location="cpu", weights_only=True)
+            state_dict = torch.load(
+                state_path,
+                map_location="cpu",
+                weights_only=True,
+            )
             self._load_trainable_state(state_dict)
 
     def _save_best_state(self) -> None:
@@ -232,34 +300,45 @@ class SelgisCore:
         self._best_state = str(path)
 
     def _load_best_state(self) -> bool:
-        """Load best saved weights. Returns True if loaded, False if none saved."""
+        """Load best saved weights.
+
+        Returns:
+            True if weights were loaded, False if no saved state exists.
+        """
         if self._best_state is None:
             return False
 
         if self._state_storage == "memory":
-            self._load_trainable_state(self._best_state)  # type: ignore[arg-type]
+            self._load_trainable_state(self._best_state)
             return True
 
         state_path = Path(self._best_state)
         if not state_path.is_file():
             return False
 
-        state_dict = torch.load(state_path, map_location="cpu", weights_only=True)
+        state_dict = torch.load(
+            state_path,
+            map_location="cpu",
+            weights_only=True,
+        )
         self._load_trainable_state(state_dict)
         return True
 
     def _rollback(self, reason: str) -> None:
-        """Rollback to last stable state and reduce LR."""
+        """Rollback to last stable state, reset optimizer momentum, and reduce LR."""
         print(f"\n[WARN] Rollback triggered: {reason}")
         self._load_last_good_state()
+        self.optimizer.state.clear()
 
         if hasattr(self.scheduler, "reduce_lr"):
             new_lr = self.scheduler.reduce_lr()
             print(f"   LR reduced to {new_lr:.2e}")
 
     def check_loss(self, loss: torch.Tensor) -> bool:
-        """
-        Check loss for anomalies (NaN/Inf/spike). Returns True if OK, False if rollback needed.
+        """Check loss for anomalies (NaN, Inf, or spike).
+
+        Returns:
+            True if the loss is normal, False if a rollback was triggered.
         """
         if not self.config.nan_recovery:
             return True
@@ -272,20 +351,20 @@ class SelgisCore:
         min_len = self.config.min_history_len
 
         if len(self._loss_history) >= min_len:
-            recent = self._loss_history[-min_len:]
-            avg = sum(recent) / len(recent)
+            history_len = len(self._loss_history)
+            avg = sum(
+                self._loss_history[i]
+                for i in range(history_len - min_len, history_len)
+            ) / min_len
             threshold = self.config.spike_threshold * avg
 
             if loss_val > threshold:
-                self._rollback(f"Spike: {loss_val:.3f} > {threshold:.3f}")
+                self._rollback(
+                    f"Spike: {loss_val:.3f} > {threshold:.3f}"
+                )
                 return False
 
         self._loss_history.append(loss_val)
-
-        if len(self._loss_history) > self._max_loss_history:
-            overflow = len(self._loss_history) - self._max_loss_history
-            del self._loss_history[:overflow]
-
         return True
 
     def backward_step(
@@ -293,18 +372,21 @@ class SelgisCore:
         loss: torch.Tensor,
         retain_graph: bool = False,
     ) -> None:
-        """
-        Backward pass with optional mixed precision. Gradient clipping in optimizer_step.
-        """
+        """Backward pass with optional mixed-precision scaling."""
         if self._scaler is not None:
             self._scaler.scale(loss).backward(retain_graph=retain_graph)
         else:
             loss.backward(retain_graph=retain_graph)
 
     def _clip_grad_norm(self, max_norm: float) -> None:
-        """Memory-efficient gradient clipping; computes L2 norm incrementally."""
+        """Clip gradient L2 norm without allocating full fp32 gradient copies.
+
+        Handles parameters distributed across multiple devices by
+        accumulating per-device norms on CPU.
+        """
         parameters = [
-            p for p in self.model.parameters()
+            p
+            for p in self.model.parameters()
             if p.grad is not None and p.requires_grad
         ]
         if not parameters:
@@ -312,11 +394,12 @@ class SelgisCore:
 
         total_norm_sq = 0.0
         for param in parameters:
-            grad = param.grad.detach()
-            total_norm_sq += grad.data.float().norm(2).item() ** 2
+            param_norm = param.grad.detach().norm(2)
+            total_norm_sq += param_norm.to(
+                device="cpu", dtype=torch.float32,
+            ).item() ** 2
 
         total_norm = total_norm_sq ** 0.5
-
         if total_norm == 0.0:
             return
 
@@ -325,14 +408,17 @@ class SelgisCore:
             return
 
         for param in parameters:
-            if param.grad is not None:
-                param.grad.detach().mul_(clip_coef)
+            param.grad.detach().mul_(clip_coef)
 
     def optimizer_step(self) -> None:
-        """Optimizer step with gradient clipping and optional AMP."""
-        # Onload gradients to device if using CPU offload
+        """Perform optimizer step with gradient clipping, AMP, and CPU offload.
+
+        The caller must invoke ``optimizer.zero_grad()`` before the
+        corresponding ``backward_step`` call.
+        """
         if self._cpu_offload:
-            self._onload_grad_to_device()
+            self._onload_grads_to_device()
+            self._onload_optimizer_state_to_device()
 
         if self._scaler is not None:
             self._scaler.unscale_(self.optimizer)
@@ -341,8 +427,13 @@ class SelgisCore:
             self._clip_grad_norm(max_norm=self.config.grad_clip_norm)
 
         if self.config.grad_clip_value is not None:
-            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-            torch.nn.utils.clip_grad_value_(trainable_params, clip_value=self.config.grad_clip_value)
+            trainable_params = [
+                p for p in self.model.parameters() if p.requires_grad
+            ]
+            torch.nn.utils.clip_grad_value_(
+                trainable_params,
+                clip_value=self.config.grad_clip_value,
+            )
 
         if self._scaler is not None:
             self._scaler.step(self.optimizer)
@@ -350,29 +441,17 @@ class SelgisCore:
         else:
             self.optimizer.step()
 
-        # Offload optimizer state back to CPU after step
         if self._cpu_offload:
             self._offload_optimizer_state()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
         self._steps_since_last_state += 1
-        if self._steps_since_last_state >= max(self._state_update_interval, 1):
+        if self._steps_since_last_state >= max(
+            self._state_update_interval, 1,
+        ):
             self._save_last_good_state()
             self._steps_since_last_state = 0
-
-    def _offload_optimizer_state(self) -> None:
-        """Move optimizer state back to CPU after step."""
-        if not self._cpu_offload:
-            return
-        for param_group in self.optimizer.param_groups:
-            for param in param_group["params"]:
-                if param.requires_grad and param in self.optimizer.state:
-                    state = self.optimizer.state[param]
-                    if "exp_avg" in state:
-                        state["exp_avg"] = state["exp_avg"].to("cpu")
-                    if "exp_avg_sq" in state:
-                        state["exp_avg_sq"] = state["exp_avg_sq"].to("cpu")
-                    if "sum" in state:
-                        state["sum"] = state["sum"].to("cpu")
 
     def eval_epoch(
         self,
@@ -381,22 +460,33 @@ class SelgisCore:
         primary_metric: str = "accuracy",
         higher_is_better: bool = True,
     ) -> Literal["IMPROVED", "SURGE", "STOP", "CONTINUE"]:
+        """Evaluate epoch result.
+
+        Returns:
+            One of ``'IMPROVED'``, ``'SURGE'``, ``'STOP'``,
+            or ``'CONTINUE'``.
         """
-        Evaluate epoch result. Returns IMPROVED, SURGE, STOP, or CONTINUE.
-        """
-        # Only step by epoch when using epoch-based schedule (warmup_ratio == 0).
-        if hasattr(self.scheduler, "step_epoch") and getattr(self.config, "warmup_ratio", 0) == 0:
+        if (
+            hasattr(self.scheduler, "step_epoch")
+            and getattr(self.config, "warmup_ratio", 0) == 0
+        ):
             self.scheduler.step_epoch(epoch)
 
         metric_val = metrics.get(primary_metric, 0.0)
         val_loss = metrics.get("loss", float("inf"))
 
         if higher_is_better:
-            improved = metric_val > self._best_metric + self.config.min_delta
+            improved = (
+                metric_val > self._best_metric + self.config.min_delta
+            )
         else:
-            improved = metric_val < self._best_metric - self.config.min_delta
+            improved = (
+                metric_val < self._best_metric - self.config.min_delta
+            )
 
-        loss_improved = val_loss < self._best_loss - self.config.min_delta
+        loss_improved = (
+            val_loss < self._best_loss - self.config.min_delta
+        )
 
         if improved or loss_improved:
             if higher_is_better:
@@ -411,9 +501,18 @@ class SelgisCore:
         self._no_improve += 1
 
         if self._no_improve >= self.config.patience:
-            if not self._surge_done and hasattr(self.scheduler, "surge_lr") and self.config.final_surge_factor > 0:
-                print(f"\n[INFO] Final surge triggered (factor={self.config.final_surge_factor})")
-                self.scheduler.surge_lr(factor=self.config.final_surge_factor)
+            if (
+                not self._surge_done
+                and hasattr(self.scheduler, "surge_lr")
+                and self.config.final_surge_factor > 0
+            ):
+                print(
+                    f"\n[INFO] Final surge triggered "
+                    f"(factor={self.config.final_surge_factor})"
+                )
+                self.scheduler.surge_lr(
+                    factor=self.config.final_surge_factor,
+                )
                 self._surge_done = True
                 self._no_improve = 0
                 return "SURGE"
@@ -422,8 +521,11 @@ class SelgisCore:
         return "CONTINUE"
 
     def load_best_weights(self) -> bool:
-        """Load best saved weights. Returns True if loaded, False otherwise."""
-        # Cleanup offload hooks before loading weights
+        """Load best saved weights.
+
+        Returns:
+            True if weights were loaded, False otherwise.
+        """
         if self._cpu_offload:
             self._cleanup_offload_handles()
 
@@ -431,14 +533,13 @@ class SelgisCore:
         if loaded:
             print("[INFO] Best weights loaded")
 
-        # Re-setup offload if enabled
         if self._cpu_offload:
             self._setup_cpu_offload()
 
         return loaded
 
     def get_amp_context(self):
-        """Return autocast context for mixed precision, or nullcontext if disabled."""
+        """Return autocast context for mixed precision, or ``nullcontext``."""
         if self._amp_dtype is not None and self.device.type == "cuda":
             return torch.amp.autocast("cuda", dtype=self._amp_dtype)
         if self._amp_dtype is not None and self.device.type == "cpu":
@@ -458,7 +559,11 @@ class SelgisCore:
     @property
     def trainable_params_count(self) -> int:
         """Number of trainable parameters."""
-        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        return sum(
+            p.numel()
+            for p in self.model.parameters()
+            if p.requires_grad
+        )
 
     @property
     def total_params_count(self) -> int:
