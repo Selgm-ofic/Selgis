@@ -522,7 +522,8 @@ class TransformerTrainer(Trainer):
             config: Transformer training configuration.
             train_dataloader: Training data loader.
             eval_dataloader: Optional evaluation data loader.
-            tokenizer: Optional HuggingFace tokenizer.
+            tokenizer: Optional HuggingFace tokenizer. Auto-loaded
+                from ``model_or_path`` if not provided.
             **kwargs: Extra arguments forwarded to ``Trainer.__init__``.
         """
         self._transformer_config = config
@@ -532,21 +533,30 @@ class TransformerTrainer(Trainer):
         else:
             model = model_or_path
 
+        if tokenizer is None and isinstance(model_or_path, str):
+            tokenizer = self._try_load_tokenizer(
+                model_or_path, config,
+            )
+
         if tokenizer is not None:
             self._sync_pad_token(model, tokenizer)
+        else:
+            self._ensure_pad_token_id(model)
 
-        if config.gradient_checkpointing:
+        if config.use_peft and config.peft_config:
+            model = self._apply_peft(
+                model,
+                config.peft_config,
+                config.problem_type,
+                gradient_checkpointing=config.gradient_checkpointing,
+            )
+        elif config.gradient_checkpointing:
             if hasattr(model, "gradient_checkpointing_enable"):
                 model.gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={
                         "use_reentrant": False,
                     },
                 )
-
-        if config.use_peft and config.peft_config:
-            model = self._apply_peft(
-                model, config.peft_config, config.problem_type,
-            )
 
         param_groups = get_optimizer_grouped_params(
             model, config.weight_decay,
@@ -563,6 +573,35 @@ class TransformerTrainer(Trainer):
         )
 
         self.tokenizer = tokenizer
+
+    @staticmethod
+    def _try_load_tokenizer(
+        model_path: str, config: TransformerConfig,
+    ):
+        """Attempt to auto-load a tokenizer from the model path.
+
+        Args:
+            model_path: HuggingFace model name or local path.
+            config: Configuration for ``trust_remote_code``.
+
+        Returns:
+            A tokenizer instance, or ``None`` if unavailable.
+        """
+        try:
+            from transformers import AutoTokenizer
+
+            trust = getattr(config, "trust_remote_code", False)
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=trust,
+            )
+            print(f"[INFO] Tokenizer auto-loaded from {model_path}")
+            return tokenizer
+        except Exception:
+            print(
+                "[WARN] Could not auto-load tokenizer. "
+                "Pass tokenizer explicitly if needed."
+            )
+            return None
 
     @staticmethod
     def _sync_pad_token(model: nn.Module, tokenizer: Any) -> None:
@@ -591,6 +630,31 @@ class TransformerTrainer(Trainer):
             print(
                 f"[INFO] Model pad_token_id set to "
                 f"{tokenizer.pad_token_id}"
+            )
+
+    @staticmethod
+    def _ensure_pad_token_id(model: nn.Module) -> None:
+        """Fallback: set pad_token_id from eos_token_id if available.
+
+        Called when no tokenizer is available to ensure the model can
+        handle batched inputs.
+
+        Args:
+            model: HuggingFace model.
+        """
+        if not hasattr(model, "config"):
+            return
+        if getattr(model.config, "pad_token_id", None) is not None:
+            return
+
+        eos_id = getattr(model.config, "eos_token_id", None)
+        if eos_id is not None:
+            if isinstance(eos_id, list):
+                eos_id = eos_id[0]
+            model.config.pad_token_id = eos_id
+            print(
+                f"[INFO] No tokenizer provided — "
+                f"pad_token_id set to eos_token_id ({eos_id})"
             )
 
     def _load_model(
@@ -741,13 +805,20 @@ class TransformerTrainer(Trainer):
         model: nn.Module,
         peft_config: dict,
         problem_type: Optional[str] = None,
+        gradient_checkpointing: bool = False,
     ) -> nn.Module:
         """Apply PEFT/LoRA adapters to the model.
+
+        Handles gradient checkpointing setup for quantized models
+        via ``prepare_model_for_kbit_training`` with proper
+        ``use_reentrant=False`` to avoid PyTorch warnings.
 
         Args:
             model: Base model.
             peft_config: LoRA configuration dictionary.
             problem_type: Optional problem type for task-type inference.
+            gradient_checkpointing: Whether to enable gradient
+                checkpointing during kbit preparation.
 
         Returns:
             Model wrapped with PEFT adapters.
@@ -772,8 +843,42 @@ class TransformerTrainer(Trainer):
             getattr(model, "is_loaded_in_8bit", False)
             or getattr(model, "is_loaded_in_4bit", False)
         )
+
         if is_quantized:
-            model = prepare_model_for_kbit_training(model)
+            gc_kwarg: Any
+            if gradient_checkpointing:
+                gc_kwarg = {"use_reentrant": False}
+            else:
+                gc_kwarg = False
+
+            try:
+                model = prepare_model_for_kbit_training(
+                    model,
+                    use_gradient_checkpointing=gc_kwarg,
+                )
+            except TypeError:
+                model = prepare_model_for_kbit_training(
+                    model,
+                    use_gradient_checkpointing=bool(
+                        gradient_checkpointing,
+                    ),
+                )
+                if (
+                    gradient_checkpointing
+                    and hasattr(model, "gradient_checkpointing_enable")
+                ):
+                    model.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={
+                            "use_reentrant": False,
+                        },
+                    )
+        elif gradient_checkpointing:
+            if hasattr(model, "gradient_checkpointing_enable"):
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={
+                        "use_reentrant": False,
+                    },
+                )
 
         task_type_mapping = {
             "causal_lm": TaskType.CAUSAL_LM,
