@@ -117,7 +117,7 @@ config = TransformerConfig(
         "r": 8,
         "lora_alpha": 16,
         "lora_dropout": 0.05,
-        "target_modules": ["query", "value"],
+        "target_modules": ["q_proj", "v_proj"],
     },
     learning_rate=2e-5,
     max_epochs=3,
