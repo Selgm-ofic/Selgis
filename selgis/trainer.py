@@ -590,6 +590,10 @@ class TransformerTrainer(Trainer):
         device_map = getattr(config, "device_map", None)
         trust_remote = getattr(config, "trust_remote_code", False)
 
+        if bnb_config is not None and device_map is None:
+            device_map = "auto"
+            print("[INFO] device_map='auto' set automatically (required for quantization)")
+
         load_kw: dict[str, Any] = {
             "trust_remote_code": trust_remote,
         }
