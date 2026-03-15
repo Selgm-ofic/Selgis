@@ -18,10 +18,7 @@ class SelgisCore:
     Features: NaN/Inf and loss spike protection, automatic rollback
     on anomalies, early stopping with final surge, gradient clipping,
     memory-efficient state management (trainable parameters only),
-    and optional CPU offload for optimizer states and gradients.
-
-    The caller is responsible for invoking ``optimizer.zero_grad()``
-    before each ``backward_step`` call.
+    and optional CPU offload for optimizer states.
     """
 
     def __init__(
@@ -66,7 +63,6 @@ class SelgisCore:
             100,
         )
         self._steps_since_last_state: int = 0
-        self._offload_grad_handles: list = []
 
         self._trainable_param_names: set[str] = (
             self._get_trainable_param_names()
@@ -108,39 +104,17 @@ class SelgisCore:
             return False
 
     def _setup_cpu_offload(self) -> None:
-        """Set up CPU offload hooks for gradients.
+        """Set up CPU offload for optimizer states.
 
         Optimizer state offload is handled lazily after each optimizer
         step, because optimizer states use lazy initialization and are
         empty until the first ``optimizer.step()`` call.
+
+        Gradient offload is not used because PyTorch 2.x enforces
+        device consistency between parameters and their gradients.
+        For LoRA models, gradients are small enough to stay on GPU.
         """
-        print(
-            "[INFO] CPU Offload enabled for optimizer states and gradients"
-        )
-        self._offload_grad_handles = []
-        for param in self.model.parameters():
-            if param.requires_grad:
-                handle = param.register_post_accumulate_grad_hook(
-                    self._grad_offload_hook,
-                )
-                self._offload_grad_handles.append(handle)
-
-    @staticmethod
-    def _grad_offload_hook(param: torch.Tensor) -> None:
-        """Move gradient to CPU after accumulation."""
-        if param.grad is not None:
-            param.grad = param.grad.to("cpu")
-
-    def _onload_grads_to_device(self) -> None:
-        """Move all gradients back to their parameter's device."""
-        if not self._cpu_offload:
-            return
-        for param in self.model.parameters():
-            if (
-                param.grad is not None
-                and param.grad.device != param.device
-            ):
-                param.grad = param.grad.to(param.device)
+        print("[INFO] CPU Offload enabled for optimizer states")
 
     def _onload_optimizer_state_to_device(self) -> None:
         """Move optimizer state tensors to compute device before step."""
@@ -177,12 +151,6 @@ class SelgisCore:
                         and val.device.type != "cpu"
                     ):
                         state[key] = val.to("cpu")
-
-    def _cleanup_offload_handles(self) -> None:
-        """Remove gradient offload hooks."""
-        for handle in self._offload_grad_handles:
-            handle.remove()
-        self._offload_grad_handles = []
 
     def _get_trainable_param_names(self) -> set[str]:
         """Return names of all trainable parameters."""
@@ -417,7 +385,6 @@ class SelgisCore:
         corresponding ``backward_step`` call.
         """
         if self._cpu_offload:
-            self._onload_grads_to_device()
             self._onload_optimizer_state_to_device()
 
         if self._scaler is not None:
@@ -526,16 +493,9 @@ class SelgisCore:
         Returns:
             True if weights were loaded, False otherwise.
         """
-        if self._cpu_offload:
-            self._cleanup_offload_handles()
-
         loaded = self._load_best_state()
         if loaded:
             print("[INFO] Best weights loaded")
-
-        if self._cpu_offload:
-            self._setup_cpu_offload()
-
         return loaded
 
     def get_amp_context(self):
