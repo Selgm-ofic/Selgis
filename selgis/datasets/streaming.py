@@ -14,9 +14,9 @@ Streaming датасеты для больших файлов (>100GB).
 from __future__ import annotations
 import json
 import gzip
+import csv
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
-from pathlib import Path
 
 import torch
 from torch.utils.data import IterableDataset
@@ -67,10 +67,11 @@ class StreamingTextDataset(StreamingDataset):
         self._file = None
         self._buffer: List[str] = []
         self._line_count = 0
+        self._global_line_idx = 0
         
         # Для разделения между воркерами
-        self._worker_start = 0
-        self._worker_end = float('inf')
+        self._worker_id = 0
+        self._num_workers = 1
         
         if not self.data_path.exists():
             raise FileNotFoundError(f"Файл не найден: {self.data_path}")
@@ -92,24 +93,16 @@ class StreamingTextDataset(StreamingDataset):
         if self._file is not None:
             try:
                 self._file.close()
-            except:
+            except Exception:
                 pass
         
-        # Определение диапазона для этого воркера
+        # Информация о воркере
         if worker_info is None:
-            # Один процесс
-            self._worker_start = 0
-            self._worker_end = float('inf')
+            self._worker_id = 0
+            self._num_workers = 1
         else:
-            # Разделение между воркерами
-            if self._total_lines:
-                per_worker = self._total_lines // worker_info.num_workers
-                self._worker_start = worker_info.id * per_worker
-                self._worker_end = self._worker_start + per_worker
-            else:
-                # Если длина неизвестна, каждый воркер читает свои строки
-                self._worker_start = 0
-                self._worker_end = float('inf')
+            self._worker_id = worker_info.id
+            self._num_workers = worker_info.num_workers
         
         # Открытие файла (поддержка сжатия)
         if self.data_path.suffix == '.gz':
@@ -117,12 +110,7 @@ class StreamingTextDataset(StreamingDataset):
         else:
             self._file = open(self.data_path, 'r', encoding='utf-8')
         
-        # Пропуск строк до начала диапазона воркера
-        if self._worker_start > 0:
-            for _ in range(self._worker_start):
-                line = self._file.readline()
-                if not line:
-                    break
+        self._global_line_idx = 0
         
         return self
     
@@ -158,13 +146,15 @@ class StreamingTextDataset(StreamingDataset):
         self._buffer = []
         
         for _ in range(self.buffer_size):
-            # Проверка достижения конца диапазона воркера
-            if self._line_count >= self._worker_end:
-                break
-            
             line = self._file.readline()
             if not line:
                 break
+            line_idx = self._global_line_idx
+            self._global_line_idx += 1
+            if self._num_workers > 1 and (
+                line_idx % self._num_workers != self._worker_id
+            ):
+                continue
             
             try:
                 # Парсинг JSONL
@@ -207,7 +197,7 @@ class StreamingTextDataset(StreamingDataset):
         if self._file is not None:
             try:
                 self._file.close()
-            except:
+            except Exception:
                 pass
             self._file = None
     
@@ -265,14 +255,16 @@ class StreamingCSVDataset(StreamingDataset):
         self._buffer: List[Dict] = []
         self._line_count = 0
         self._headers: Optional[List[str]] = None
+        self._reader: Optional[csv.DictReader] = None
+        self._global_line_idx = 0
+        self._worker_id = 0
+        self._num_workers = 1
         
         if not self.data_path.exists():
             raise FileNotFoundError(f"Файл не найден: {self.data_path}")
     
     def __iter__(self):
         """Итератор с поддержкой multi-processing."""
-        import csv
-        
         worker_info = torch.utils.data.get_worker_info()
         
         # Сброс состояния
@@ -282,34 +274,22 @@ class StreamingCSVDataset(StreamingDataset):
         if self._file is not None:
             try:
                 self._file.close()
-            except:
+            except Exception:
                 pass
-        
-        # Определение диапазона для воркера
+        self._reader = None
+
         if worker_info is None:
-            self._worker_start = 0
-            self._worker_end = float('inf')
+            self._worker_id = 0
+            self._num_workers = 1
         else:
-            if self._total_lines:
-                per_worker = self._total_lines // worker_info.num_workers
-                self._worker_start = worker_info.id * per_worker
-                self._worker_end = self._worker_start + per_worker
-            else:
-                self._worker_start = 0
-                self._worker_end = float('inf')
+            self._worker_id = worker_info.id
+            self._num_workers = worker_info.num_workers
         
         # Открытие CSV файла
         self._file = open(self.data_path, 'r', encoding='utf-8', newline='')
-        reader = csv.DictReader(self._file)
-        self._headers = reader.fieldnames
-        
-        # Пропуск строк до начала диапазона
-        if self._worker_start > 0:
-            for _ in range(self._worker_start):
-                try:
-                    next(reader)
-                except StopIteration:
-                    break
+        self._reader = csv.DictReader(self._file)
+        self._headers = self._reader.fieldnames
+        self._global_line_idx = 0
         
         return self
     
@@ -345,17 +325,19 @@ class StreamingCSVDataset(StreamingDataset):
         if self._file is None:
             return
         
-        import csv
-        
         self._buffer = []
-        reader = csv.DictReader(self._file, fieldnames=self._headers)
+        if self._reader is None:
+            return
         
         for _ in range(self.buffer_size):
-            if self._line_count >= self._worker_end:
-                break
-            
             try:
-                record = next(reader)
+                record = next(self._reader)
+                line_idx = self._global_line_idx
+                self._global_line_idx += 1
+                if self._num_workers > 1 and (
+                    line_idx % self._num_workers != self._worker_id
+                ):
+                    continue
                 self._buffer.append(record)
             except StopIteration:
                 break
@@ -365,7 +347,7 @@ class StreamingCSVDataset(StreamingDataset):
         if self._file is not None:
             try:
                 self._file.close()
-            except:
+            except Exception:
                 pass
             self._file = None
     

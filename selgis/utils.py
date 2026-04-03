@@ -1,4 +1,5 @@
 """Training utilities: device, seeding, batch handling, param groups."""
+from __future__ import annotations
 
 import os
 import random

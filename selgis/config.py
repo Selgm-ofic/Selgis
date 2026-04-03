@@ -1,4 +1,6 @@
 """Configuration dataclasses for generic and Transformer training."""
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
@@ -37,6 +39,7 @@ class SelgisConfig:
     # === LR Finder ===
     lr_finder_enabled: bool = False
     lr_finder_trainable_only: bool = False
+    lr_finder_save_optimizer_state: bool = False
     lr_finder_start: float = 1e-7
     lr_finder_end: float = 1.0
     lr_finder_steps: int = 100
@@ -75,10 +78,13 @@ class SelgisConfig:
     state_storage: Literal["disk", "memory"] = "disk"
     state_dir: Optional[str] = None
     state_update_interval: int = 100
+    resume_from_checkpoint: Optional[str] = None
 
     # === Device ===
     device: str = "auto"
     cpu_offload: bool = False
+    empty_cache_steps: int = 0
+    gc_collect_steps: int = 0
 
     # === Reproducibility ===
     seed: int = 42
@@ -146,6 +152,7 @@ class TransformerConfig(SelgisConfig):
     # === LoRA / PEFT ===
     use_peft: bool = False
     peft_config: dict[str, Any] = field(default_factory=dict)
+    adapter_name_or_path: Optional[str] = None
 
     # === Gradient Checkpointing ===
     gradient_checkpointing: bool = False
@@ -171,10 +178,15 @@ class TransformerConfig(SelgisConfig):
         """
         super().__post_init__()
 
-        if self.use_peft and not self.peft_config:
+        if (
+            self.use_peft
+            and not self.peft_config
+            and not self.adapter_name_or_path
+        ):
             raise ValueError(
-                "peft_config must be provided when use_peft=True. "
-                "Example: peft_config={'r': 16, 'lora_alpha': 32, "
+                "peft_config or adapter_name_or_path must be provided "
+                "when use_peft=True. Example: "
+                "peft_config={'r': 16, 'lora_alpha': 32, "
                 "'lora_dropout': 0.05}"
             )
 

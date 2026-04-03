@@ -86,6 +86,8 @@ class TextDataset(BaseDataset):
         # Кэш для pre-tokenized данных
         self._tokenized_cache: Optional[List[Dict]] = None
         self._tokenized_path: Optional[Path] = None
+        self._cache_index_path: Optional[Path] = None
+        self._cache_index: Optional[Dict[str, int]] = None
         
         # Метрики
         self._metrics = {
@@ -168,7 +170,7 @@ class TextDataset(BaseDataset):
         
         # Токенизация
         if self.tokenizer:
-            result = self._tokenize_cached(formatted)
+            result = self._tokenize_cached(formatted, idx)
         else:
             result = {"inputs": formatted, "text": text}
         
@@ -234,6 +236,7 @@ class TextDataset(BaseDataset):
             return
         
         self._tokenized_path = self._get_tokenized_cache_path()
+        self._cache_index_path = self._tokenized_path.with_suffix(".index.json")
         
         if self._tokenized_path.exists():
             print(f"[INFO] Pre-tokenized кэш найден: {self._tokenized_path}")
@@ -243,6 +246,7 @@ class TextDataset(BaseDataset):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         tokenized = []
+        index_map: Dict[str, int] = {}
         for i in range(len(self)):
             if self.file_format == "jsonl":
                 record = self._load_record_mmap(i) if self.use_mmap else self._load_record_seek(i)
@@ -253,25 +257,40 @@ class TextDataset(BaseDataset):
             formatted = self.format_fn(record) if self.format_fn else text
             encoded = self._tokenize_single(formatted)
             tokenized.append(encoded)
+            index_map[self._make_text_hash(formatted)] = i
             
             if (i + 1) % 1000 == 0:
                 print(f"  Токенизировано: {i + 1}/{len(self)}")
         
         torch.save(tokenized, self._tokenized_path)
+        if self._cache_index_path is not None:
+            with open(self._cache_index_path, "w", encoding="utf-8") as f:
+                json.dump(index_map, f, ensure_ascii=False)
         print(f"[INFO] Сохранено в {self._tokenized_path}")
     
-    def _tokenize_cached(self, text: str) -> Dict[str, Any]:
+    def _tokenize_cached(self, text: str, idx: Optional[int] = None) -> Dict[str, Any]:
         """Токенизация с проверкой кэша."""
         if self.cache_dir and self._tokenized_path and self._tokenized_path.exists():
             # Lazy load кэша
             if self._tokenized_cache is None:
                 print(f"[INFO] Загрузка pre-tokenized кэша...")
                 self._tokenized_cache = torch.load(self._tokenized_path, map_location='cpu')
-                self._metrics["cache_hits"] = len(self._tokenized_cache)
+                if (
+                    self._cache_index_path is not None
+                    and self._cache_index_path.exists()
+                ):
+                    with open(self._cache_index_path, "r", encoding="utf-8") as f:
+                        self._cache_index = json.load(f)
             
-            # Найти индекс текста в кэше (через хэш)
-            cache_idx = self._get_cache_index(text)
-            if cache_idx is not None and cache_idx < len(self._tokenized_cache):
+            cache_idx = idx
+            if cache_idx is None:
+                cache_idx = self._get_cache_index(text)
+            if (
+                cache_idx is not None
+                and self._tokenized_cache is not None
+                and 0 <= cache_idx < len(self._tokenized_cache)
+            ):
+                self._metrics["cache_hits"] += 1
                 return self._tokenized_cache[cache_idx]
         
         # Токенизация без кэша
@@ -299,9 +318,14 @@ class TextDataset(BaseDataset):
     
     def _get_cache_index(self, text: str) -> Optional[int]:
         """Получить индекс текста в кэше через хэш."""
-        # Простая реализация через хэш текста
-        # В production можно использовать более умный индекс
-        return None
+        if self._cache_index is None:
+            return None
+        return self._cache_index.get(self._make_text_hash(text))
+
+    @staticmethod
+    def _make_text_hash(text: str) -> str:
+        """Стабильный hash текста для cache index."""
+        return hashlib.md5(text.encode("utf-8")).hexdigest()
     
     def _get_tokenized_cache_path(self) -> Path:
         """Получить путь к кэшу токенизации."""

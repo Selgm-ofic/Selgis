@@ -9,6 +9,7 @@ Usage::
 """
 import argparse
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 
@@ -111,6 +112,7 @@ def _build_config(raw: dict):
         A ``SelgisConfig`` or ``TransformerConfig`` instance.
     """
     from selgis import SelgisConfig, TransformerConfig
+    from selgis.datasets import DatasetConfig
 
     transformer_keys = {
         "model_name_or_path",
@@ -125,13 +127,34 @@ def _build_config(raw: dict):
         "device_map",
     }
 
-    if transformer_keys & raw.keys():
-        return TransformerConfig(**raw)
+    trainer_cls = (
+        TransformerConfig if transformer_keys & raw.keys() else SelgisConfig
+    )
+    trainer_field_names = {f.name for f in fields(trainer_cls)}
+    dataset_field_names = {f.name for f in fields(DatasetConfig)}
 
-    return SelgisConfig(**raw)
+    trainer_raw = {
+        k: v for k, v in raw.items() if k in trainer_field_names
+    }
+    dataset_raw = {
+        k: v for k, v in raw.items() if k in dataset_field_names
+    }
+
+    unknown_keys = sorted(
+        k
+        for k in raw.keys()
+        if k not in trainer_field_names and k not in dataset_field_names
+    )
+    if unknown_keys:
+        print(
+            "[WARN] Ignoring unknown config keys: "
+            + ", ".join(unknown_keys)
+        )
+
+    return trainer_cls(**trainer_raw), dataset_raw
 
 
-def _build_dataloaders(config):
+def _build_dataloaders(config, dataset_raw: dict | None = None):
     """Create train/eval DataLoaders from config fields or defaults.
 
     Looks for ``data_path`` / ``train_path`` in *config*. When found,
@@ -147,38 +170,23 @@ def _build_dataloaders(config):
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
-    data_path = getattr(config, "data_path", None)
-    train_path = getattr(config, "train_path", None)
+    dataset_raw = dataset_raw or {}
+    data_path = dataset_raw.get("data_path")
+    train_path = dataset_raw.get("train_path")
 
     if data_path or train_path:
         from selgis import DatasetConfig, create_dataloaders
 
-        ds_kwargs = {
-            "batch_size": config.batch_size,
-            "num_workers": 0,
-        }
-
+        ds_kwargs = dict(dataset_raw)
+        ds_kwargs.setdefault("batch_size", config.batch_size)
+        ds_kwargs.setdefault("num_workers", 0)
         if hasattr(config, "max_length"):
-            ds_kwargs["max_length"] = config.max_length
-
-        if data_path:
-            ds_kwargs["data_path"] = data_path
-        if train_path:
-            ds_kwargs["train_path"] = train_path
-
-        eval_path = getattr(config, "eval_path", None)
-        if eval_path:
-            ds_kwargs["eval_path"] = eval_path
-
-        data_type = getattr(config, "data_type", None)
-        if data_type:
-            ds_kwargs["data_type"] = data_type
-        else:
-            ds_kwargs["data_type"] = "text"
+            ds_kwargs.setdefault("max_length", config.max_length)
+        ds_kwargs.setdefault("data_type", "text")
 
         tokenizer = _try_load_tokenizer(config)
         if tokenizer is not None:
-            ds_kwargs["tokenizer"] = tokenizer
+            ds_kwargs.setdefault("tokenizer", tokenizer)
 
         ds_config = DatasetConfig(**ds_kwargs)
         return create_dataloaders(ds_config)
@@ -267,14 +275,16 @@ def _train_from_config(config_path: Path) -> int:
     print(f"[INFO] Loaded config from {config_path}")
 
     try:
-        config = _build_config(raw)
+        config, dataset_raw = _build_config(raw)
     except (TypeError, ValueError) as exc:
         print(f"Error building config: {exc}", file=sys.stderr)
         return 1
 
     print(f"[INFO] Config type: {type(config).__name__}")
 
-    train_loader, eval_loader = _build_dataloaders(config)
+    train_loader, eval_loader = _build_dataloaders(
+        config, dataset_raw=dataset_raw
+    )
 
     if isinstance(config, TransformerConfig) and config.model_name_or_path:
         return _train_transformer(config, train_loader, eval_loader)

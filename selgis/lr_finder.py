@@ -1,4 +1,5 @@
 """Learning rate finder (Leslie Smith style)."""
+from __future__ import annotations
 
 import math
 from contextlib import nullcontext
@@ -38,12 +39,14 @@ class LRFinder:
         device: torch.device | None = None,
         trainable_only: bool = False,
         amp_dtype: torch.dtype | None = None,
+        save_optimizer_state: bool = False,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
         self.trainable_only = trainable_only
         self.amp_dtype = amp_dtype
+        self.save_optimizer_state = save_optimizer_state
 
         self._has_device_map = hasattr(model, "hf_device_map")
 
@@ -63,16 +66,26 @@ class LRFinder:
             }
 
         self._initial_state = self._clone_state()
-        self._initial_optim_state = {
-            k: (
-                v.cpu().clone()
-                if isinstance(v, torch.Tensor)
-                else v
+        self._initial_optim_state = None
+        self._initial_lrs = [pg["lr"] for pg in optimizer.param_groups]
+        if self.save_optimizer_state:
+            self._initial_optim_state = self._clone_any(
+                optimizer.state_dict(),
             )
-            for k, v in optimizer.state_dict().items()
-        }
         self._lrs: list[float] = []
         self._losses: list[float] = []
+
+    def _clone_any(self, value: Any):
+        """Deep-clone arbitrary optimizer state to CPU."""
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().clone()
+        if isinstance(value, dict):
+            return {k: self._clone_any(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._clone_any(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(self._clone_any(v) for v in value)
+        return value
 
     def _clone_state(self) -> dict[str, torch.Tensor]:
         """Clone model state to CPU.
@@ -100,7 +113,12 @@ class LRFinder:
                 if name in self._initial_state:
                     param.data.copy_(self._initial_state[name])
 
-        self.optimizer.load_state_dict(self._initial_optim_state)
+        if self._initial_optim_state is not None:
+            self.optimizer.load_state_dict(self._initial_optim_state)
+        else:
+            for idx, pg in enumerate(self.optimizer.param_groups):
+                if idx < len(self._initial_lrs):
+                    pg["lr"] = self._initial_lrs[idx]
 
     def _get_amp_context(self):
         """Return autocast context matching training configuration."""
@@ -211,7 +229,8 @@ class LRFinder:
     def _free_saved_state(self) -> None:
         """Release saved state tensors to free memory."""
         self._initial_state.clear()
-        self._initial_optim_state.clear()
+        if self._initial_optim_state is not None:
+            self._initial_optim_state.clear()
 
     def _compute_loss(
         self,

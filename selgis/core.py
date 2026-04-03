@@ -1,4 +1,6 @@
 """SELGIS core: training protection and optimization."""
+from __future__ import annotations
+
 import warnings
 from collections import deque
 from contextlib import nullcontext

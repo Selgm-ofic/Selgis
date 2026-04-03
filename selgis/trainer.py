@@ -1,5 +1,10 @@
 """Universal trainers for PyTorch and HuggingFace Transformers."""
+from __future__ import annotations
+
 import math
+import gc
+import json
+from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -97,8 +102,25 @@ class Trainer:
                 weight_decay=config.weight_decay,
             )
         self.optimizer = optimizer
+        self._resume_meta: dict[str, Any] = {}
+        self._start_epoch = 0
 
-        if config.lr_finder_enabled:
+        use_lr_finder = bool(config.lr_finder_enabled)
+        if getattr(config, "resume_from_checkpoint", None):
+            use_lr_finder = False
+            if config.lr_finder_enabled:
+                print(
+                    "[INFO] LR finder disabled because "
+                    "resume_from_checkpoint is set."
+                )
+
+        if use_lr_finder:
+            if config.fp16:
+                amp_dtype = torch.float16
+            elif config.bf16:
+                amp_dtype = torch.bfloat16
+            else:
+                amp_dtype = None
             lr_finder = LRFinder(
                 model,
                 self.optimizer,
@@ -106,6 +128,10 @@ class Trainer:
                 self.device,
                 trainable_only=getattr(
                     config, "lr_finder_trainable_only", False,
+                ),
+                amp_dtype=amp_dtype,
+                save_optimizer_state=getattr(
+                    config, "lr_finder_save_optimizer_state", False,
                 ),
             )
             self.initial_lr = lr_finder.find(
@@ -179,6 +205,73 @@ class Trainer:
 
         self._global_step = 0
         self._current_epoch = 0
+        self._empty_cache_steps = max(
+            int(getattr(config, "empty_cache_steps", 0)),
+            0,
+        )
+        self._gc_collect_steps = max(
+            int(getattr(config, "gc_collect_steps", 0)),
+            0,
+        )
+        self._resume_if_needed()
+
+    def _torch_load(
+        self,
+        path: Path,
+        map_location: str | torch.device = "cpu",
+        weights_only: bool = False,
+    ):
+        """Load a torch object with compatibility for old PyTorch."""
+        kwargs: dict[str, Any] = {"map_location": map_location}
+        if weights_only:
+            try:
+                return torch.load(path, **kwargs, weights_only=True)
+            except TypeError:
+                return torch.load(path, **kwargs)
+        return torch.load(path, **kwargs)
+
+    def _resume_if_needed(self) -> None:
+        """Resume model/optimizer/scheduler states from checkpoint."""
+        ckpt_path_raw = getattr(self.config, "resume_from_checkpoint", None)
+        if not ckpt_path_raw:
+            return
+
+        checkpoint_dir = Path(ckpt_path_raw)
+        if not checkpoint_dir.exists() or not checkpoint_dir.is_dir():
+            raise ValueError(
+                f"resume checkpoint directory not found: {checkpoint_dir}"
+            )
+
+        model_path = checkpoint_dir / "model.pt"
+        if model_path.exists():
+            self.load_model(str(model_path), weights_only=True)
+
+        optimizer_path = checkpoint_dir / "optimizer.pt"
+        if optimizer_path.exists():
+            optim_state = self._torch_load(
+                optimizer_path, map_location="cpu",
+            )
+            self.optimizer.load_state_dict(optim_state)
+
+        scheduler_path = checkpoint_dir / "scheduler.pt"
+        if (
+            scheduler_path.exists()
+            and hasattr(self.scheduler, "load_state_dict")
+        ):
+            scheduler_state = self._torch_load(
+                scheduler_path, map_location="cpu",
+            )
+            self.scheduler.load_state_dict(scheduler_state)
+
+        metrics_path = checkpoint_dir / "metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            self._resume_meta = meta
+            self._global_step = int(meta.get("global_step", 0))
+            self._start_epoch = int(meta.get("epoch", -1)) + 1
+
+        print(f"[INFO] Resumed from checkpoint: {checkpoint_dir}")
 
     def train(self) -> dict[str, Any]:
         """Run the full training loop.
@@ -192,7 +285,7 @@ class Trainer:
             self.config, "primary_metric", None,
         )
 
-        for epoch in range(self.config.max_epochs):
+        for epoch in range(self._start_epoch, self.config.max_epochs):
             self._current_epoch = epoch
             self._call_callbacks("on_epoch_begin", epoch=epoch)
 
@@ -217,12 +310,20 @@ class Trainer:
                 chosen_metric = "loss"
                 higher_is_better = False
 
-            status = self.selgis.eval_epoch(
-                metrics,
-                epoch,
-                primary_metric=chosen_metric,
-                higher_is_better=higher_is_better,
-            )
+            if self.eval_dataloader is None:
+                if (
+                    hasattr(self.scheduler, "step_epoch")
+                    and getattr(self.config, "warmup_ratio", 0) == 0
+                ):
+                    self.scheduler.step_epoch(epoch)
+                status = "CONTINUE"
+            else:
+                status = self.selgis.eval_epoch(
+                    metrics,
+                    epoch,
+                    primary_metric=chosen_metric,
+                    higher_is_better=higher_is_better,
+                )
 
             if status == "STOP":
                 break
@@ -276,6 +377,7 @@ class Trainer:
                 step=self._global_step,
                 loss=loss if loss is not None else 0.0,
             )
+            self._maybe_release_memory()
 
         if accum_count > 0:
             self.selgis.optimizer_step()
@@ -284,6 +386,22 @@ class Trainer:
             self._global_step += 1
 
         return total_loss / max(num_steps, 1)
+
+    def _maybe_release_memory(self) -> None:
+        """Optionally release CPU/GPU allocator pressure during training."""
+        if self._gc_collect_steps > 0 and (
+            self._global_step > 0
+            and self._global_step % self._gc_collect_steps == 0
+        ):
+            gc.collect()
+
+        if (
+            self._empty_cache_steps > 0
+            and self.device.type == "cuda"
+            and self._global_step > 0
+            and self._global_step % self._empty_cache_steps == 0
+        ):
+            torch.cuda.empty_cache()
 
     def _step_scheduler_if_needed(self) -> None:
         """Call scheduler step when using step-based schedule."""
@@ -405,6 +523,9 @@ class Trainer:
         all_labels: list[torch.Tensor] = []
         correct = 0
         total = 0
+        regression_se_sum = 0.0
+        regression_ae_sum = 0.0
+        regression_count = 0
 
         for batch in self.eval_dataloader:
             _, labels = unpack_batch(batch)
@@ -414,12 +535,16 @@ class Trainer:
 
             total_loss += loss.item()
             num_batches += 1
+            logits_shape = tuple(logits.shape)
 
             preds = (
                 logits.argmax(dim=-1).cpu()
                 if logits.dim() > 1
                 else logits.cpu()
             )
+            preds_reg = None
+            if labels is not None and preds.dim() == labels.dim():
+                preds_reg = preds
             del logits
 
             if labels is not None:
@@ -434,10 +559,30 @@ class Trainer:
                     all_preds.append(preds)
                     all_labels.append(labels_cpu)
                 else:
-                    if preds.shape != labels_cpu.shape:
-                        preds = preds.view_as(labels_cpu)
-                    correct += (preds == labels_cpu).sum().item()
-                    total += labels_cpu.numel()
+                    is_regression = (
+                        torch.is_floating_point(labels_cpu)
+                        or (
+                            len(logits_shape) == labels_cpu.dim()
+                            and logits_shape == tuple(labels_cpu.shape)
+                        )
+                        or (len(logits_shape) > 1 and logits_shape[-1] == 1)
+                    )
+                    if is_regression:
+                        if preds_reg is None:
+                            preds_reg = preds
+                        if preds_reg.shape != labels_cpu.shape:
+                            preds_reg = preds_reg.view_as(labels_cpu)
+                        diff = preds_reg - labels_cpu
+                        regression_se_sum += (
+                            diff.pow(2).sum().item()
+                        )
+                        regression_ae_sum += diff.abs().sum().item()
+                        regression_count += labels_cpu.numel()
+                    else:
+                        if preds.shape != labels_cpu.shape:
+                            preds = preds.view_as(labels_cpu)
+                        correct += (preds == labels_cpu).sum().item()
+                        total += labels_cpu.numel()
 
         metrics: dict[str, float] = {
             "loss": total_loss / max(num_batches, 1),
@@ -447,8 +592,12 @@ class Trainer:
             preds_cat = torch.cat(all_preds)
             labels_cat = torch.cat(all_labels)
             metrics.update(self.compute_metrics(preds_cat, labels_cat))
-        elif self.compute_metrics is None and total > 0:
-            metrics["accuracy"] = correct / total * 100
+        elif self.compute_metrics is None:
+            if total > 0:
+                metrics["accuracy"] = correct / total * 100
+            elif regression_count > 0:
+                metrics["mse"] = regression_se_sum / regression_count
+                metrics["mae"] = regression_ae_sum / regression_count
 
         self._call_callbacks("on_evaluate", metrics=metrics)
 
@@ -481,11 +630,17 @@ class Trainer:
                 Requires PyTorch >= 2.0. Set False only for trusted
                 checkpoints.
         """
+        resolved_path = Path(path)
+        if resolved_path.is_dir():
+            model_file = resolved_path / "model.pt"
+            if model_file.exists():
+                resolved_path = model_file
+
         load_kwargs: dict[str, Any] = {"map_location": self.device}
         if weights_only:
             try:
                 state = torch.load(
-                    path, **load_kwargs, weights_only=True,
+                    resolved_path, **load_kwargs, weights_only=True,
                 )
             except TypeError:
                 print(
@@ -493,10 +648,17 @@ class Trainer:
                     "(PyTorch < 2.0). Loading with weights_only=False "
                     "— only use with trusted checkpoints!"
                 )
-                state = torch.load(path, **load_kwargs)
+                state = torch.load(resolved_path, **load_kwargs)
         else:
-            state = torch.load(path, **load_kwargs)
-        self.model.load_state_dict(state, strict=True)
+            state = torch.load(resolved_path, **load_kwargs)
+        try:
+            self.model.load_state_dict(state, strict=True)
+        except RuntimeError as exc:
+            print(
+                "[WARN] Strict load failed; retrying with strict=False "
+                f"({exc})"
+            )
+            self.model.load_state_dict(state, strict=False)
 
 
 class TransformerTrainer(Trainer):
@@ -545,12 +707,17 @@ class TransformerTrainer(Trainer):
         else:
             self._ensure_pad_token_id(model)
 
-        if config.use_peft and config.peft_config:
+        if config.use_peft and (
+            config.peft_config or config.adapter_name_or_path
+        ):
             model = self._apply_peft(
                 model,
                 config.peft_config,
                 config.problem_type,
                 gradient_checkpointing=config.gradient_checkpointing,
+                adapter_name_or_path=getattr(
+                    config, "adapter_name_or_path", None,
+                ),
             )
         elif config.gradient_checkpointing:
             if hasattr(model, "gradient_checkpointing_enable"):
@@ -892,6 +1059,7 @@ class TransformerTrainer(Trainer):
         peft_config: dict,
         problem_type: Optional[str] = None,
         gradient_checkpointing: bool = False,
+        adapter_name_or_path: Optional[str] = None,
     ) -> nn.Module:
         """Apply PEFT/LoRA adapters to the model.
 
@@ -915,6 +1083,7 @@ class TransformerTrainer(Trainer):
         try:
             from peft import (
                 LoraConfig,
+                PeftModel,
                 TaskType,
                 get_peft_model,
                 prepare_model_for_kbit_training,
@@ -989,11 +1158,24 @@ class TransformerTrainer(Trainer):
         else:
             task_type = TaskType.SEQ_CLS
 
-        filtered_config = {
-            k: v for k, v in peft_config.items() if k != "task_type"
-        }
-        lora_config = LoraConfig(task_type=task_type, **filtered_config)
-        peft_model = get_peft_model(model, lora_config)
+        if adapter_name_or_path:
+            peft_model = PeftModel.from_pretrained(
+                model,
+                adapter_name_or_path,
+                is_trainable=True,
+            )
+            print(
+                "[INFO] Loaded existing LoRA adapter from "
+                f"{adapter_name_or_path} for continued training"
+            )
+        else:
+            filtered_config = {
+                k: v for k, v in peft_config.items() if k != "task_type"
+            }
+            lora_config = LoraConfig(
+                task_type=task_type, **filtered_config,
+            )
+            peft_model = get_peft_model(model, lora_config)
 
         trainable_params = sum(
             p.numel()

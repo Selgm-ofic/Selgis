@@ -255,13 +255,27 @@ class CheckpointCallback(Callback):
         """
         path.mkdir(parents=True, exist_ok=True)
 
-        state_dict = {}
-        for name, param in trainer.model.named_parameters():
-            if param.requires_grad:
-                if param.device.type == "cpu":
-                    state_dict[name] = param.detach().clone()
+        is_peft = getattr(getattr(trainer, "selgis", None), "_is_peft_model", False)
+        if is_peft:
+            state_dict = {}
+            for name, param in trainer.model.named_parameters():
+                if param.requires_grad:
+                    if param.device.type == "cpu":
+                        state_dict[name] = param.detach().clone()
+                    else:
+                        state_dict[name] = param.detach().cpu()
+            state_format = "trainable_only"
+        else:
+            state_dict = {}
+            for name, tensor in trainer.model.state_dict().items():
+                if isinstance(tensor, torch.Tensor):
+                    if tensor.device.type == "cpu":
+                        state_dict[name] = tensor.detach().clone()
+                    else:
+                        state_dict[name] = tensor.detach().cpu()
                 else:
-                    state_dict[name] = param.detach().cpu()
+                    state_dict[name] = tensor
+            state_format = "full"
         torch.save(state_dict, path / "model.pt")
 
         torch.save(
@@ -283,6 +297,7 @@ class CheckpointCallback(Callback):
         meta = {
             "epoch": epoch,
             "global_step": global_step,
+            "state_format": state_format,
             **metrics,
         }
         with open(path / "metrics.json", "w", encoding="utf-8") as f:

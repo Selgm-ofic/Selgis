@@ -8,7 +8,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split, DistributedSampler, IterableDataset
+from torch.utils.data import (
+    Dataset,
+    DataLoader,
+    random_split,
+    DistributedSampler,
+    IterableDataset,
+    Subset,
+)
 
 from selgis.datasets.config import DatasetConfig
 from selgis.datasets.base import BaseDataset, StreamingDataset
@@ -76,7 +83,13 @@ def _create_text_dataset(config: DatasetConfig):
         raise ValueError("Для text датасета требуется data_path или train_path")
     
     # Проверка — это HF dataset или локальный файл
-    if isinstance(data_path, str) and "/" in data_path and not Path(data_path).exists():
+    data_path_str = str(data_path)
+    path_obj = Path(data_path_str)
+    if (
+        "/" in data_path_str
+        and not path_obj.exists()
+        and path_obj.suffix == ""
+    ):
         # Это HF dataset name (например, "tatsu-lab/alpaca")
         return HFTextDataset(
             dataset_name=str(data_path),
@@ -337,8 +350,15 @@ def _create_dataloader(
         print("[WARN] IterableDataset не поддерживает shuffle. Отключаю.")
         shuffle = False
     
+    def _resolve_collate_fn(ds: Dataset):
+        if hasattr(ds, "collate_fn"):
+            return getattr(ds, "collate_fn")
+        if isinstance(ds, Subset):
+            return _resolve_collate_fn(ds.dataset)
+        return None
+
     # Collate функция
-    collate_fn = getattr(dataset, 'collate_fn', None)
+    collate_fn = _resolve_collate_fn(dataset)
     
     # Sampler для DDP
     sampler = None
