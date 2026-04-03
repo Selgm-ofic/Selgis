@@ -5,7 +5,7 @@
 
 # Selgis ML Library - Complete API Documentation
 
-**Version:** 0.2.3
+**Version:** 0.2.4
 **Description:** Universal Training Framework for PyTorch and HuggingFace Transformers
 
 ---
@@ -171,6 +171,7 @@ config = SelgisConfig(
     # LR Finder
     lr_finder_enabled=False,
     lr_finder_trainable_only=False,
+    lr_finder_save_optimizer_state=False,
     lr_finder_start=1e-7,
     lr_finder_end=1.0,
     lr_finder_steps=100,
@@ -207,10 +208,13 @@ config = SelgisConfig(
     state_storage="disk",
     state_dir=None,
     state_update_interval=100,
+    resume_from_checkpoint=None,
 
     # Device
     device="auto",
     cpu_offload=False,
+    empty_cache_steps=0,
+    gc_collect_steps=0,
 
     # Reproducibility
     seed=42,
@@ -237,6 +241,7 @@ config = SelgisConfig(
 | `nan_recovery` | bool | True | Enable automatic recovery from NaN/Inf loss. When enabled, the trainer will attempt to restore previous good state and reduce LR. |
 | `lr_finder_enabled` | bool | False | Enable learning rate finder at training start. Automatically searches for optimal initial LR. Set to True when you want auto-tuned LR instead of using the configured `learning_rate`. |
 | `lr_finder_trainable_only` | bool | False | Only tune trainable parameters during LR search. Saves memory for large/LoRA models. |
+| `lr_finder_save_optimizer_state` | bool | False | Save/restore full optimizer state during LR finder. Keep `False` for the most lightweight memory mode. |
 | `lr_finder_start` | float | 1e-7 | Starting LR for finder search. |
 | `lr_finder_end` | float | 1.0 | Ending LR for finder search. |
 | `lr_finder_steps` | int | 100 | Number of steps for LR search. More steps = finer granularity. |
@@ -255,8 +260,11 @@ config = SelgisConfig(
 | `save_total_limit` | int | 3 | Maximum number of checkpoints to keep. Older checkpoints are automatically deleted. |
 | `save_best_only` | bool | True | Save only the best checkpoint (based on eval metric). Set False to save all epochs. |
 | `state_storage` | str | "disk" | State storage mode: `disk` (saves RAM, slower) or `memory` (faster, uses more RAM). Used for rollback on NaN/Inf. |
+| `resume_from_checkpoint` | str or None | None | Path to checkpoint directory (`model.pt`, `optimizer.pt`, `scheduler.pt`, `metrics.json`) to continue training. |
 | `device` | str | "auto" | Device selection: `auto` (cuda > mps > cpu), `cuda`, `cpu`, `mps`. |
 | `cpu_offload` | bool | False | Offload optimizer states and gradients to CPU. Reduces GPU VRAM usage at slight speed cost. Independent from `device_map`. |
+| `empty_cache_steps` | int | 0 | If > 0, calls `torch.cuda.empty_cache()` every N optimizer steps. |
+| `gc_collect_steps` | int | 0 | If > 0, calls `gc.collect()` every N optimizer steps. |
 | `seed` | int | 42 | Random seed for reproducibility. Sets seeds for random, numpy, torch, and CUDA. Also sets `cudnn.deterministic=True` and `cudnn.benchmark=False` for full reproducibility. |
 
 #### Validation Rules
@@ -308,6 +316,7 @@ config = TransformerConfig(
         "bias": "none",
         "task_type": "SEQ_CLS",
     },
+    adapter_name_or_path=None,  # Continue training existing adapter
 
     # Gradient Checkpointing
     gradient_checkpointing=False,
@@ -339,6 +348,7 @@ config = TransformerConfig(
 | `adam_epsilon` | float | 1e-8 | AdamW epsilon parameter (numerical stability). |
 | `use_peft` | bool | False | Enable PEFT/LoRA for parameter-efficient fine-tuning. Requires `peft_config` to be non-empty. |
 | `peft_config` | dict | {} | LoRA configuration: `r` (rank), `lora_alpha` (scaling), `lora_dropout`, `target_modules`, `bias`, `task_type`. Must be provided when `use_peft=True`. |
+| `adapter_name_or_path` | str or None | None | Path to an existing PEFT adapter to load and continue training (`PeftModel.from_pretrained(..., is_trainable=True)`). |
 | `gradient_checkpointing` | bool | False | Enable gradient checkpointing. Reduces memory by ~40% at slight speed cost. |
 | `quantization_type` | str | "no" | Quantization type: `no`, `8bit`, `4bit`. Requires GPU (cannot be used with `device="cpu"`). |
 | `bnb_4bit_compute_dtype` | str | "float16" | Compute dtype for 4-bit quantization: `float16`, `bfloat16` (recommended for Ampere+). |
@@ -350,7 +360,7 @@ config = TransformerConfig(
 | Constraint | Exception |
 |------------|-----------|
 | All `SelgisConfig` validations | (inherited) |
-| `use_peft=True` requires non-empty `peft_config` | `ValueError` |
+| `use_peft=True` requires `peft_config` or `adapter_name_or_path` | `ValueError` |
 | `quantization_type` other than `"no"` requires `device != "cpu"` | `ValueError` |
 
 #### `cpu_offload` vs `device_map`
@@ -1580,7 +1590,7 @@ config = SelgisConfig(
 |-----------|---------|----------|
 | `ImportError` | Missing `transformers`, `peft`, or `bitsandbytes` | `pip install selgis[all]` |
 | `ValueError` | Conflicting config (e.g., `fp16=True` & `bf16=True`) | Fix configuration |
-| `ValueError` | `use_peft=True` without `peft_config` | Provide `peft_config={...}` |
+| `ValueError` | `use_peft=True` without `peft_config` and without `adapter_name_or_path` | Provide `peft_config={...}` or `adapter_name_or_path="..."` |
 | `ValueError` | `quantization_type="4bit"` with `device="cpu"` | Use a GPU device |
 | `ValueError` | `gradient_accumulation_steps=0` or negative | Set to >= 1 |
 | `ValueError` | Both `warmup_epochs` and `warmup_ratio` > 0 | Use one or the other |

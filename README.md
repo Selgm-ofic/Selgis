@@ -344,6 +344,7 @@ config = SelgisConfig(
     lr_finder_end=1.0,         # Maximum LR
     lr_finder_steps=100,       # Search steps
     lr_finder_trainable_only=True,  # Save memory for LoRA
+    lr_finder_save_optimizer_state=False,  # Most lightweight mode
 )
 ```
 
@@ -502,6 +503,7 @@ config = SelgisConfig(
     save_best_only=True,       # Save only best model
     state_storage="disk",      # Store state on disk (saves RAM)
     state_update_interval=100, # Save state every N steps
+    resume_from_checkpoint=None,  # Continue from checkpoint dir
 )
 ```
 
@@ -667,10 +669,40 @@ $ selgis train --config lora_config.yaml
 
 # Library version
 $ selgis version
-Selgis ML v0.2.3
+0.2.4
 ```
 
 ---
+
+### Continue Training from Checkpoint
+
+```python
+config = SelgisConfig(
+    max_epochs=10,
+    resume_from_checkpoint="./output/checkpoint-epoch-4",
+)
+```
+
+### Continue Existing LoRA Adapter
+
+```python
+config = TransformerConfig(
+    model_name_or_path="Qwen/Qwen-2.5-3B",
+    use_peft=True,
+    adapter_name_or_path="./output/final_model",
+    # Optional for creating new adapters; not required when adapter_name_or_path is set
+    peft_config={},
+)
+```
+
+### Extra Memory Controls
+
+```python
+config = SelgisConfig(
+    gc_collect_steps=200,   # Periodic Python GC
+    empty_cache_steps=100,  # Periodic CUDA cache cleanup
+)
+```
 
 ## Testing
 
