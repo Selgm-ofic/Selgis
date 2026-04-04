@@ -769,9 +769,6 @@ Selgis works out of the box — no hours of hyperparameter tuning needed.
 ## Documentation
 
 - [API Reference](API.md) — All classes and parameters
-- [API_DOCUMENTATION.md](API_DOCUMENTATION.md) — Detailed examples with comments
-- [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) — Analysis and competitor comparison
-- [TEST_REPORT.md](TEST_REPORT.md) — Complete test results (16/16 passed)
 
 ---
 
