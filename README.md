@@ -730,8 +730,6 @@ pytest test_selgis.py -v
 - ✅ Self-healing & Rollback Procedures
 - ✅ Extended Pretraining (88.9% reduction)
 
-See [TEST_REPORT.md](TEST_REPORT.md) for detailed results.
-
 ---
 
 ## Smart Defaults Comparison
@@ -774,7 +772,6 @@ Selgis works out of the box — no hours of hyperparameter tuning needed.
 
 ## Community
 
-- **GitHub:** https://github.com/selgis/selgis
 - **PyPI:** https://pypi.org/project/selgis/
 - **Issues & PRs:** Welcome!
 
