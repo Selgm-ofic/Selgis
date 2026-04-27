@@ -1,8 +1,10 @@
 """Learning rate finder (Leslie Smith style)."""
+
 from __future__ import annotations
 
+import gc
 import math
-from contextlib import nullcontext
+from contextlib import nullcontext, AbstractContextManager
 from typing import Any, Callable, Optional
 
 import torch
@@ -48,7 +50,7 @@ class LRFinder:
         self.amp_dtype = amp_dtype
         self.save_optimizer_state = save_optimizer_state
 
-        self._has_device_map = hasattr(model, "hf_device_map")
+        self._has_device_map = bool(getattr(model, "hf_device_map", None))
 
         if device is not None:
             self.device = device
@@ -59,11 +61,7 @@ class LRFinder:
 
         self._trainable_names: set[str] | None = None
         if trainable_only:
-            self._trainable_names = {
-                n
-                for n, p in model.named_parameters()
-                if p.requires_grad
-            }
+            self._trainable_names = {n for n, p in model.named_parameters() if p.requires_grad}
 
         self._initial_state = self._clone_state()
         self._initial_optim_state = None
@@ -95,10 +93,7 @@ class LRFinder:
         """
         state: dict[str, torch.Tensor] = {}
         for name, param in self.model.named_parameters():
-            if (
-                self._trainable_names is not None
-                and name not in self._trainable_names
-            ):
+            if self._trainable_names is not None and name not in self._trainable_names:
                 continue
             if param.device.type == "cpu":
                 state[name] = param.detach().clone()
@@ -120,7 +115,7 @@ class LRFinder:
                 if idx < len(self._initial_lrs):
                     pg["lr"] = self._initial_lrs[idx]
 
-    def _get_amp_context(self):
+    def _get_amp_context(self) -> AbstractContextManager:
         """Return autocast context matching training configuration."""
         if self.amp_dtype is None:
             return nullcontext()
@@ -161,6 +156,10 @@ class LRFinder:
         Returns:
             Suggested optimal learning rate.
         """
+        if num_steps <= 0:
+            print("[WARN] num_steps must be positive, using default LR")
+            return start_lr
+
         print("\n[INFO] Searching for optimal LR...")
 
         mult = (end_lr / start_lr) ** (1.0 / num_steps)
@@ -184,20 +183,13 @@ class LRFinder:
 
             loss = self._compute_loss(batch, forward_fn)
 
-            if (
-                loss is None
-                or torch.isnan(loss)
-                or torch.isinf(loss)
-            ):
+            if loss is None or torch.isnan(loss) or torch.isinf(loss):
                 print(f"[WARN] Loss exploded at LR={lr:.2e}")
                 break
 
             loss_val = loss.item()
             smoothed_loss = (
-                loss_val
-                if step == 0
-                else smooth_f * loss_val
-                + (1 - smooth_f) * smoothed_loss
+                loss_val if step == 0 else smooth_f * loss_val + (1 - smooth_f) * smoothed_loss
             )
 
             self._losses.append(smoothed_loss)
@@ -211,6 +203,7 @@ class LRFinder:
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
+
             self.optimizer.step()
 
             lr *= mult
@@ -220,7 +213,8 @@ class LRFinder:
         self._free_saved_state()
 
         optimal_lr = self._compute_optimal_lr(
-            self._lrs, self._losses,
+            self._lrs,
+            self._losses,
         )
         print(f"[INFO] Found optimal LR: {optimal_lr:.2e}")
 
@@ -228,9 +222,13 @@ class LRFinder:
 
     def _free_saved_state(self) -> None:
         """Release saved state tensors to free memory."""
-        self._initial_state.clear()
-        if self._initial_optim_state is not None:
-            self._initial_optim_state.clear()
+        self._initial_state = {}
+        self._initial_optim_state = None
+        self._lrs = []
+        self._losses = []
+        gc.collect()
+        if self._trainable_names is not None:
+            self._trainable_names = None
 
     def _compute_loss(
         self,
@@ -258,28 +256,16 @@ class LRFinder:
 
             if is_dict_like(inputs):
                 outputs = self.model(**dict(inputs))
-                if (
-                    hasattr(outputs, "loss")
-                    and outputs.loss is not None
-                ):
+                if hasattr(outputs, "loss") and outputs.loss is not None:
                     return outputs.loss
                 if self.criterion is None:
-                    raise ValueError(
-                        "Model doesn't return loss, "
-                        "criterion required"
-                    )
-                logits = (
-                    outputs.logits
-                    if hasattr(outputs, "logits")
-                    else outputs
-                )
+                    raise ValueError("Model doesn't return loss, criterion required")
+                logits = outputs.logits if hasattr(outputs, "logits") else outputs
                 return self.criterion(logits, labels)
 
             outputs = self.model(inputs)
             if self.criterion is None:
-                raise ValueError(
-                    "Criterion required for tensor input"
-                )
+                raise ValueError("Criterion required for tensor input")
             return self.criterion(outputs, labels)
 
     def _set_lr(self, lr: float) -> None:

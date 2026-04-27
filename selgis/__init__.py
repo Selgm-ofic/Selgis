@@ -11,9 +11,10 @@ def _get_version() -> str:
     """Return package version from metadata (single source: pyproject.toml)."""
     try:
         from importlib.metadata import version
+
         return version("selgis")
     except Exception:
-        return "0.2.40"
+        return "0.2.5"
 
 
 __version__ = _get_version()
@@ -27,6 +28,7 @@ from selgis.callbacks import (
     SparsityCallback,
     WandBCallback,
 )
+from selgis.checkpointing import GradientCheckpointingManager
 from selgis.config import SelgisConfig, TransformerConfig
 from selgis.core import SelgisCore
 from selgis.datasets import (
@@ -44,6 +46,7 @@ from selgis.datasets import (
     prepare_data_for_trainer,
 )
 from selgis.lr_finder import LRFinder
+from selgis.loss import ChunkedCrossEntropyLoss, CrossEntropyLossV2
 from selgis.scheduler import SmartScheduler, get_transformer_scheduler
 from selgis.trainer import Trainer, TransformerTrainer
 from selgis.utils import (
@@ -62,11 +65,9 @@ __all__ = [
     # Config
     "SelgisConfig",
     "TransformerConfig",
-    
     # Core
     "SelgisCore",
-    
-    # Datasets (NEW)
+    # Datasets
     "BaseDataset",
     "StreamingDataset",
     "DatasetConfig",
@@ -79,14 +80,17 @@ __all__ = [
     "create_dataset",
     "create_dataloaders",
     "prepare_data_for_trainer",
-    
     # Training
     "LRFinder",
     "SmartScheduler",
     "get_transformer_scheduler",
     "Trainer",
     "TransformerTrainer",
-    
+    # Loss
+    "ChunkedCrossEntropyLoss",
+    "CrossEntropyLossV2",
+    # Checkpointing
+    "GradientCheckpointingManager",
     # Callbacks
     "Callback",
     "EarlyStoppingCallback",
@@ -95,7 +99,6 @@ __all__ = [
     "WandBCallback",
     "SparsityCallback",
     "HistoryCallback",
-    
     # Utils
     "get_device",
     "seed_everything",

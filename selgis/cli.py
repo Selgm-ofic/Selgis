@@ -7,6 +7,7 @@ Usage::
     selgis train [--config path/to/config.yaml]
     selgis test
 """
+
 import argparse
 import sys
 from dataclasses import fields
@@ -60,8 +61,7 @@ def _load_yaml(path: Path) -> dict:
             data = yaml.safe_load(text)
         except ImportError:
             print(
-                "Error: PyYAML is required for .yaml configs. "
-                "Install with: pip install pyyaml",
+                "Error: PyYAML is required for .yaml configs. Install with: pip install pyyaml",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -81,16 +81,14 @@ def _load_yaml(path: Path) -> dict:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 print(
-                    f"Error: cannot parse {path}. "
-                    f"Install PyYAML or use .json format.",
+                    f"Error: cannot parse {path}. Install PyYAML or use .json format.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
 
     if not isinstance(data, dict):
         print(
-            f"Error: config must be a YAML/JSON mapping, "
-            f"got {type(data).__name__}",
+            f"Error: config must be a YAML/JSON mapping, got {type(data).__name__}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -122,34 +120,27 @@ def _build_config(raw: dict):
         "optimizer_type",
         "quantization_type",
         "gradient_checkpointing",
+        "gc_checkpoint_interval",
+        "chunked_ce",
+        "ce_chunk_size",
+        "flash_attention",
         "num_labels",
         "trust_remote_code",
         "device_map",
     }
 
-    trainer_cls = (
-        TransformerConfig if transformer_keys & raw.keys() else SelgisConfig
-    )
+    trainer_cls = TransformerConfig if transformer_keys.intersection(raw.keys()) else SelgisConfig
     trainer_field_names = {f.name for f in fields(trainer_cls)}
     dataset_field_names = {f.name for f in fields(DatasetConfig)}
 
-    trainer_raw = {
-        k: v for k, v in raw.items() if k in trainer_field_names
-    }
-    dataset_raw = {
-        k: v for k, v in raw.items() if k in dataset_field_names
-    }
+    trainer_raw = {k: v for k, v in raw.items() if k in trainer_field_names}
+    dataset_raw = {k: v for k, v in raw.items() if k in dataset_field_names}
 
     unknown_keys = sorted(
-        k
-        for k in raw.keys()
-        if k not in trainer_field_names and k not in dataset_field_names
+        k for k in raw.keys() if k not in trainer_field_names and k not in dataset_field_names
     )
     if unknown_keys:
-        print(
-            "[WARN] Ignoring unknown config keys: "
-            + ", ".join(unknown_keys)
-        )
+        print("[WARN] Ignoring unknown config keys: " + ", ".join(unknown_keys))
 
     return trainer_cls(**trainer_raw), dataset_raw
 
@@ -226,12 +217,21 @@ def _try_load_tokenizer(config):
 
         trust = getattr(config, "trust_remote_code", False)
         tokenizer = AutoTokenizer.from_pretrained(
-            model_name, trust_remote_code=trust,
+            model_name,
+            trust_remote_code=trust,
         )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
-    except Exception:
+    except (ImportError, OSError) as e:
+        import logging
+
+        logging.getLogger(__name__).debug(f"Could not load tokenizer: {e}")
+        return None
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning(f"Error loading tokenizer: {e}")
         return None
 
 
@@ -282,9 +282,7 @@ def _train_from_config(config_path: Path) -> int:
 
     print(f"[INFO] Config type: {type(config).__name__}")
 
-    train_loader, eval_loader = _build_dataloaders(
-        config, dataset_raw=dataset_raw
-    )
+    train_loader, eval_loader = _build_dataloaders(config, dataset_raw=dataset_raw)
 
     if isinstance(config, TransformerConfig) and config.model_name_or_path:
         return _train_transformer(config, train_loader, eval_loader)
@@ -351,11 +349,19 @@ def _train_pytorch(config, train_loader, eval_loader) -> int:
 
     from selgis import Trainer
 
-    sample = next(iter(train_loader))
+    try:
+        sample = next(iter(train_loader))
+    except StopIteration:
+        print("Error: train_loader is empty", file=sys.stderr)
+        return 1
+
     if isinstance(sample, (tuple, list)):
+        if len(sample) == 0:
+            print("Error: train_loader returned empty batch", file=sys.stderr)
+            return 1
         input_dim = sample[0].shape[-1]
     elif hasattr(sample, "keys"):
-        first_key = next(iter(sample))
+        first_key = next(iter(sample.keys()))
         input_dim = sample[first_key].shape[-1]
     else:
         input_dim = sample.shape[-1]
@@ -474,10 +480,7 @@ def main() -> int:
     """Entry point for the ``selgis`` command."""
     parser = argparse.ArgumentParser(
         prog="selgis",
-        description=(
-            "SELGIS — Universal Training Framework "
-            "for PyTorch and Transformers"
-        ),
+        description=("SELGIS — Universal Training Framework for PyTorch and Transformers"),
     )
     parser.add_argument(
         "--version",
@@ -486,15 +489,18 @@ def main() -> int:
     )
 
     subparsers = parser.add_subparsers(
-        dest="command", help="Available commands",
+        dest="command",
+        help="Available commands",
     )
 
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser(
-        "device", help="Show compute device (CUDA/MPS/CPU)",
+        "device",
+        help="Show compute device (CUDA/MPS/CPU)",
     )
     subparsers.add_parser(
-        "test", help="Run the complete test suite (16 tests)",
+        "test",
+        help="Run the complete test suite (16 tests)",
     )
 
     train_parser = subparsers.add_parser("train", help="Run training")

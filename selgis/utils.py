@@ -1,6 +1,8 @@
 """Training utilities: device, seeding, batch handling, param groups."""
+
 from __future__ import annotations
 
+import logging
 import os
 import random
 from collections.abc import Mapping
@@ -9,6 +11,8 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 def get_device(preference: str = "auto") -> torch.device:
@@ -25,23 +29,23 @@ def get_device(preference: str = "auto") -> torch.device:
     if preference == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
-        elif (
-            hasattr(torch.backends, "mps")
-            and torch.backends.mps.is_available()
-        ):
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             device = torch.device("mps")
         else:
             device = torch.device("cpu")
     else:
         device = torch.device(preference)
 
-    print(f"[INFO] Device: {device}")
+    logger.info("Device: %s", device)
 
     if device.type == "cuda":
         idx = device.index if device.index is not None else 0
         props = torch.cuda.get_device_properties(idx)
-        print(f"   GPU: {torch.cuda.get_device_name(idx)}")
-        print(f"   Memory: {props.total_memory / 1024 ** 3:.2f} GB")
+        logger.info("GPU: %s", torch.cuda.get_device_name(idx))
+        logger.info(
+            "Memory: %.2f GB",
+            props.total_memory / 1024**3,
+        )
 
     return device
 
@@ -71,7 +75,8 @@ def seed_everything(seed: int, deterministic: bool = True) -> None:
 
 
 def count_parameters(
-    model: nn.Module, trainable_only: bool = True,
+    model: nn.Module,
+    trainable_only: bool = True,
 ) -> int:
     """Count model parameters.
 
@@ -84,9 +89,7 @@ def count_parameters(
         Total number of (trainable) parameters.
     """
     if trainable_only:
-        return sum(
-            p.numel() for p in model.parameters() if p.requires_grad
-        )
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
     return sum(p.numel() for p in model.parameters())
 
 
@@ -152,18 +155,11 @@ def move_to_device(
     if isinstance(batch, torch.Tensor):
         return batch.to(device, non_blocking=non_blocking)
     if is_dict_like(batch):
-        return {
-            k: move_to_device(v, device, non_blocking)
-            for k, v in batch.items()
-        }
+        return {k: move_to_device(v, device, non_blocking) for k, v in batch.items()}
     if isinstance(batch, tuple):
-        return tuple(
-            move_to_device(x, device, non_blocking) for x in batch
-        )
+        return tuple(move_to_device(x, device, non_blocking) for x in batch)
     if isinstance(batch, list):
-        return [
-            move_to_device(x, device, non_blocking) for x in batch
-        ]
+        return [move_to_device(x, device, non_blocking) for x in batch]
     return batch
 
 

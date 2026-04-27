@@ -1,4 +1,5 @@
 """Configuration dataclasses for generic and Transformer training."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -49,7 +50,11 @@ class SelgisConfig:
     warmup_ratio: float = 0.0
     min_lr: float = 1e-7
     scheduler_type: Literal[
-        "cosine", "cosine_restart", "linear", "constant", "polynomial",
+        "cosine",
+        "cosine_restart",
+        "linear",
+        "constant",
+        "polynomial",
     ] = "cosine_restart"
     t_0: int = 10
     t_mult: int = 2
@@ -100,13 +105,30 @@ class SelgisConfig:
         if self.fp16 and self.bf16:
             raise ValueError("Cannot use both fp16 and bf16")
         if self.warmup_epochs > 0 and self.warmup_ratio > 0:
-            raise ValueError(
-                "Use either warmup_epochs or warmup_ratio, not both"
-            )
+            raise ValueError("Use either warmup_epochs or warmup_ratio, not both")
         if self.gradient_accumulation_steps < 1:
             raise ValueError(
-                "gradient_accumulation_steps must be >= 1, "
-                f"got {self.gradient_accumulation_steps}"
+                f"gradient_accumulation_steps must be >= 1, got {self.gradient_accumulation_steps}"
+            )
+        if self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {self.batch_size}")
+        if self.eval_batch_size <= 0:
+            raise ValueError(f"eval_batch_size must be positive, got {self.eval_batch_size}")
+        if self.max_epochs <= 0:
+            raise ValueError(f"max_epochs must be positive, got {self.max_epochs}")
+        if self.learning_rate <= 0:
+            raise ValueError(f"learning_rate must be positive, got {self.learning_rate}")
+        if self.save_total_limit is not None and self.save_total_limit < 0:
+            raise ValueError(f"save_total_limit must be non-negative, got {self.save_total_limit}")
+        if self.patience < 0:
+            raise ValueError(f"patience must be non-negative, got {self.patience}")
+        if self.spike_threshold <= 0:
+            raise ValueError(f"spike_threshold must be positive, got {self.spike_threshold}")
+        if self.min_history_len <= 0:
+            raise ValueError(f"min_history_len must be positive, got {self.min_history_len}")
+        if self.state_update_interval <= 0:
+            raise ValueError(
+                f"state_update_interval must be positive, got {self.state_update_interval}"
             )
 
 
@@ -136,13 +158,18 @@ class TransformerConfig(SelgisConfig):
     # === Tokenizer ===
     max_length: int = 512
     padding: Literal[
-        "max_length", "longest", "do_not_pad",
+        "max_length",
+        "longest",
+        "do_not_pad",
     ] = "max_length"
     truncation: bool = True
 
     # === Optimizer ===
     optimizer_type: Literal[
-        "adamw", "adam", "sgd", "adafactor",
+        "adamw",
+        "adam",
+        "sgd",
+        "adafactor",
     ] = "adamw"
     learning_rate: float = 2e-5
     adam_beta1: float = 0.9
@@ -156,6 +183,14 @@ class TransformerConfig(SelgisConfig):
 
     # === Gradient Checkpointing ===
     gradient_checkpointing: bool = False
+    gc_checkpoint_interval: int = 1
+
+    # === Chunked Cross-Entropy ===
+    chunked_ce: bool = False
+    ce_chunk_size: int = 1024
+
+    # === Flash Attention ===
+    flash_attention: bool = False
 
     # === DeepSpeed ===
     deepspeed_config: Optional[str] = None
@@ -163,7 +198,9 @@ class TransformerConfig(SelgisConfig):
     # === Quantization (BitsAndBytes) ===
     quantization_type: Literal["no", "8bit", "4bit"] = "no"
     bnb_4bit_compute_dtype: Literal[
-        "float16", "bfloat16", "float32",
+        "float16",
+        "bfloat16",
+        "float32",
     ] = "float16"
     bnb_4bit_quant_type: Literal["fp4", "nf4"] = "nf4"
     bnb_4bit_use_double_quant: bool = False
@@ -178,11 +215,7 @@ class TransformerConfig(SelgisConfig):
         """
         super().__post_init__()
 
-        if (
-            self.use_peft
-            and not self.peft_config
-            and not self.adapter_name_or_path
-        ):
+        if self.use_peft and not self.peft_config and not self.adapter_name_or_path:
             raise ValueError(
                 "peft_config or adapter_name_or_path must be provided "
                 "when use_peft=True. Example: "
@@ -192,6 +225,13 @@ class TransformerConfig(SelgisConfig):
 
         if self.quantization_type != "no" and self.device == "cpu":
             raise ValueError(
-                f"quantization_type={self.quantization_type!r} "
-                f"requires GPU, but device='cpu'"
+                f"quantization_type={self.quantization_type!r} requires GPU, but device='cpu'"
+            )
+
+        if self.chunked_ce and self.ce_chunk_size <= 0:
+            raise ValueError(f"ce_chunk_size must be positive, got {self.ce_chunk_size}")
+
+        if self.gc_checkpoint_interval < 1:
+            raise ValueError(
+                f"gc_checkpoint_interval must be >= 1, got {self.gc_checkpoint_interval}"
             )

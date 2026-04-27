@@ -1,9 +1,12 @@
 """SELGIS core: training protection and optimization."""
+
 from __future__ import annotations
 
+import logging
+import itertools
 import warnings
 from collections import deque
-from contextlib import nullcontext
+from contextlib import nullcontext, AbstractContextManager
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
@@ -12,6 +15,8 @@ import torch.nn as nn
 
 from selgis.config import SelgisConfig
 from selgis.scheduler import SmartScheduler
+
+logger = logging.getLogger(__name__)
 
 
 class SelgisCore:
@@ -53,6 +58,7 @@ class SelgisCore:
         self._loss_history: deque[float] = deque(
             maxlen=max(self.config.min_history_len * 10, 1000),
         )
+        self._higher_is_better: Optional[bool] = None
         self._best_metric = float("-inf")
         self._best_loss = float("inf")
         self._best_state: Optional[Union[dict, str]] = None
@@ -66,18 +72,15 @@ class SelgisCore:
         )
         self._steps_since_last_state: int = 0
 
-        self._trainable_param_names: set[str] = (
-            self._get_trainable_param_names()
-        )
+        self._trainable_param_names: set[str] = self._get_trainable_param_names()
 
         total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(
-            p.numel() for p in model.parameters() if p.requires_grad
-        )
-        print(
-            f"[INFO] Parameters: {trainable_params:,} trainable / "
-            f"{total_params:,} total "
-            f"({100 * trainable_params / total_params:.2f}%)"
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(
+            "Parameters: %d trainable / %d total (%.2f%%)",
+            trainable_params,
+            total_params,
+            100 * trainable_params / total_params if total_params > 0 else 0.0,
         )
 
         if self._cpu_offload:
@@ -95,6 +98,9 @@ class SelgisCore:
             self._amp_dtype = torch.bfloat16
         else:
             self._amp_dtype = None
+
+        if self._cpu_offload:
+            logger.info("CPU Offload enabled for optimizer states")
 
     def _check_is_peft_model(self) -> bool:
         """Return True if the model is a PEFT (e.g. LoRA) model."""
@@ -116,7 +122,7 @@ class SelgisCore:
         device consistency between parameters and their gradients.
         For LoRA models, gradients are small enough to stay on GPU.
         """
-        print("[INFO] CPU Offload enabled for optimizer states")
+        logger.debug("CPU offload initialized")
 
     def _onload_optimizer_state_to_device(self) -> None:
         """Move optimizer state tensors to compute device before step."""
@@ -130,10 +136,7 @@ class SelgisCore:
                     continue
                 state = self.optimizer.state[param]
                 for key, val in state.items():
-                    if (
-                        isinstance(val, torch.Tensor)
-                        and val.device != param.device
-                    ):
+                    if isinstance(val, torch.Tensor) and val.device != param.device:
                         state[key] = val.to(param.device)
 
     def _offload_optimizer_state(self) -> None:
@@ -148,19 +151,12 @@ class SelgisCore:
                     continue
                 state = self.optimizer.state[param]
                 for key, val in state.items():
-                    if (
-                        isinstance(val, torch.Tensor)
-                        and val.device.type != "cpu"
-                    ):
+                    if isinstance(val, torch.Tensor) and val.device.type != "cpu":
                         state[key] = val.to("cpu")
 
     def _get_trainable_param_names(self) -> set[str]:
         """Return names of all trainable parameters."""
-        return {
-            name
-            for name, param in self.model.named_parameters()
-            if param.requires_grad
-        }
+        return {name for name, param in self.model.named_parameters() if param.requires_grad}
 
     def _clone_trainable_state(self) -> dict:
         """Clone only trainable parameters to CPU.
@@ -189,9 +185,7 @@ class SelgisCore:
         trainable_names = self._trainable_param_names
 
         missing_in_model = [k for k in state if k not in current_state]
-        missing_in_state = [
-            k for k in trainable_names if k not in state
-        ]
+        missing_in_state = [k for k in trainable_names if k not in state]
 
         if missing_in_model:
             warnings.warn(
@@ -296,13 +290,19 @@ class SelgisCore:
 
     def _rollback(self, reason: str) -> None:
         """Rollback to last stable state, reset optimizer momentum, and reduce LR."""
-        print(f"\n[WARN] Rollback triggered: {reason}")
+        logger.warning("Rollback triggered: %s", reason)
         self._load_last_good_state()
-        self.optimizer.state.clear()
+
+        for group in self.optimizer.param_groups:
+            for param in group["params"]:
+                if param in self.optimizer.state:
+                    del self.optimizer.state[param]
 
         if hasattr(self.scheduler, "reduce_lr"):
             new_lr = self.scheduler.reduce_lr()
-            print(f"   LR reduced to {new_lr:.2e}")
+            logger.info("LR reduced to %.2e", new_lr)
+
+        self._steps_since_last_state = 0
 
     def check_loss(self, loss: torch.Tensor) -> bool:
         """Check loss for anomalies (NaN, Inf, or spike).
@@ -321,17 +321,12 @@ class SelgisCore:
         min_len = self.config.min_history_len
 
         if len(self._loss_history) >= min_len:
-            history_len = len(self._loss_history)
-            avg = sum(
-                self._loss_history[i]
-                for i in range(history_len - min_len, history_len)
-            ) / min_len
+            recent = list(itertools.islice(reversed(self._loss_history), min_len))
+            avg = sum(recent) / min_len
             threshold = self.config.spike_threshold * avg
 
             if loss_val > threshold:
-                self._rollback(
-                    f"Spike: {loss_val:.3f} > {threshold:.3f}"
-                )
+                self._rollback(f"Spike: {loss_val:.3f} > {threshold:.3f}")
                 return False
 
         self._loss_history.append(loss_val)
@@ -354,22 +349,22 @@ class SelgisCore:
         Handles parameters distributed across multiple devices by
         accumulating per-device norms on CPU.
         """
-        parameters = [
-            p
-            for p in self.model.parameters()
-            if p.grad is not None and p.requires_grad
-        ]
+        parameters = [p for p in self.model.parameters() if p.grad is not None and p.requires_grad]
         if not parameters:
             return
 
         total_norm_sq = 0.0
         for param in parameters:
             param_norm = param.grad.detach().norm(2)
-            total_norm_sq += param_norm.to(
-                device="cpu", dtype=torch.float32,
-            ).item() ** 2
+            total_norm_sq += (
+                param_norm.to(
+                    device="cpu",
+                    dtype=torch.float32,
+                ).item()
+                ** 2
+            )
 
-        total_norm = total_norm_sq ** 0.5
+        total_norm = total_norm_sq**0.5
         if total_norm == 0.0:
             return
 
@@ -396,9 +391,7 @@ class SelgisCore:
             self._clip_grad_norm(max_norm=self.config.grad_clip_norm)
 
         if self.config.grad_clip_value is not None:
-            trainable_params = [
-                p for p in self.model.parameters() if p.requires_grad
-            ]
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
             torch.nn.utils.clip_grad_value_(
                 trainable_params,
                 clip_value=self.config.grad_clip_value,
@@ -417,7 +410,8 @@ class SelgisCore:
 
         self._steps_since_last_state += 1
         if self._steps_since_last_state >= max(
-            self._state_update_interval, 1,
+            self._state_update_interval,
+            1,
         ):
             self._save_last_good_state()
             self._steps_since_last_state = 0
@@ -435,27 +429,22 @@ class SelgisCore:
             One of ``'IMPROVED'``, ``'SURGE'``, ``'STOP'``,
             or ``'CONTINUE'``.
         """
-        if (
-            hasattr(self.scheduler, "step_epoch")
-            and getattr(self.config, "warmup_ratio", 0) == 0
-        ):
-            self.scheduler.step_epoch(epoch)
+        if hasattr(self.scheduler, "step_epoch"):
+            self.scheduler._epoch = epoch
 
         metric_val = metrics.get(primary_metric, 0.0)
         val_loss = metrics.get("loss", float("inf"))
 
-        if higher_is_better:
-            improved = (
-                metric_val > self._best_metric + self.config.min_delta
-            )
-        else:
-            improved = (
-                metric_val < self._best_metric - self.config.min_delta
-            )
+        if self._higher_is_better is None:
+            self._higher_is_better = higher_is_better
+            self._best_metric = float("-inf") if higher_is_better else float("inf")
 
-        loss_improved = (
-            val_loss < self._best_loss - self.config.min_delta
-        )
+        if higher_is_better:
+            improved = metric_val > self._best_metric + self.config.min_delta
+        else:
+            improved = metric_val < self._best_metric - self.config.min_delta
+
+        loss_improved = val_loss < self._best_loss - self.config.min_delta
 
         if improved or loss_improved:
             if higher_is_better:
@@ -475,9 +464,9 @@ class SelgisCore:
                 and hasattr(self.scheduler, "surge_lr")
                 and self.config.final_surge_factor > 0
             ):
-                print(
-                    f"\n[INFO] Final surge triggered "
-                    f"(factor={self.config.final_surge_factor})"
+                logger.info(
+                    "Final surge triggered (factor=%.1f)",
+                    self.config.final_surge_factor,
                 )
                 self.scheduler.surge_lr(
                     factor=self.config.final_surge_factor,
@@ -497,10 +486,10 @@ class SelgisCore:
         """
         loaded = self._load_best_state()
         if loaded:
-            print("[INFO] Best weights loaded")
+            logger.info("Best weights loaded")
         return loaded
 
-    def get_amp_context(self):
+    def get_amp_context(self) -> AbstractContextManager:
         """Return autocast context for mixed precision, or ``nullcontext``."""
         if self._amp_dtype is not None and self.device.type == "cuda":
             return torch.amp.autocast("cuda", dtype=self._amp_dtype)
@@ -521,13 +510,82 @@ class SelgisCore:
     @property
     def trainable_params_count(self) -> int:
         """Number of trainable parameters."""
-        return sum(
-            p.numel()
-            for p in self.model.parameters()
-            if p.requires_grad
-        )
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
     @property
     def total_params_count(self) -> int:
         """Total number of parameters."""
         return sum(p.numel() for p in self.model.parameters())
+
+    def enable_flash_attention(self) -> bool:
+        """Enable Flash Attention 2 (Flash SDP) for GPU.
+
+        Uses PyTorch's scaled_dot_product_attention with Flash kernel.
+        Requires:
+        - CUDA device with compute capability >= 8.0 (Ampere or newer)
+        - PyTorch >= 2.0 with CUDA
+
+        Returns:
+            True if Flash Attention was enabled, False if not available.
+        """
+        if self.device.type != "cuda":
+            logger.debug("Flash Attention requires CUDA device")
+            return False
+
+        try:
+            import torch.backends.cuda
+        except ImportError:
+            return False
+
+        cuda_capable = torch.cuda.is_available()
+        if not cuda_capable:
+            logger.debug("CUDA not available")
+            return False
+
+        sm = torch.cuda.get_device_capability(self.device)
+        if sm[0] < 8:
+            logger.debug(f"Flash Attention requires compute capability >= 8.0, got {sm[0]}.{sm[1]}")
+            self._enable_mem_efficient_attention()
+            return False
+
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+        logger.info(f"Flash Attention enabled (compute capability {sm[0]}.{sm[1]})")
+        return True
+
+    def _enable_mem_efficient_attention(self) -> bool:
+        """Enable memory-efficient attention (SDPA fallback).
+
+        Falls back to memory-efficient kernel when Flash is unavailable.
+        Works on older GPUs but is slower.
+        """
+        if self.device.type != "cuda":
+            return False
+
+        try:
+            import torch.backends.cuda
+
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            logger.info("Memory-efficient attention enabled (fallback)")
+            return True
+        except ImportError:
+            return False
+
+    def is_flash_attention_enabled(self) -> bool:
+        """Check if Flash Attention is currently enabled."""
+        try:
+            import torch.backends.cuda
+
+            return torch.backends.cuda.flash_sdp_enabled()
+        except (ImportError, AttributeError):
+            return False
+
+    def is_mem_efficient_attention_enabled(self) -> bool:
+        """Check if memory-efficient attention is enabled."""
+        try:
+            import torch.backends.cuda
+
+            return torch.backends.cuda.mem_efficient_sdp_enabled()
+        except (ImportError, AttributeError):
+            return False

@@ -43,8 +43,7 @@ class SmartScheduler:
             )
         elif config.warmup_ratio > 0:
             warnings.warn(
-                "warmup_ratio > 0 but num_training_steps not provided. "
-                "Warmup disabled.",
+                "warmup_ratio > 0 but num_training_steps not provided. Warmup disabled.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -69,10 +68,12 @@ class SmartScheduler:
         self._epoch = epoch
         warmup = self.config.warmup_epochs
 
-        if epoch < warmup:
+        if warmup > 0 and epoch < warmup:
             lr = self._effective_lr * (epoch + 1) / warmup
-        else:
+        elif warmup > 0:
             lr = self._compute_lr_after_warmup(epoch - warmup)
+        else:
+            lr = self._compute_lr_after_warmup(epoch)
 
         self._set_lr(lr)
         return lr
@@ -85,13 +86,11 @@ class SmartScheduler:
         """
         self._step += 1
 
-        if self._step <= self._warmup_steps:
+        if self._warmup_steps > 0 and self._step <= self._warmup_steps:
             lr = self._effective_lr * self._step / self._warmup_steps
         else:
             adjusted = self._step - self._warmup_steps
-            total = (
-                self.num_training_steps or DEFAULT_NUM_TRAINING_STEPS
-            ) - self._warmup_steps
+            total = (self.num_training_steps or DEFAULT_NUM_TRAINING_STEPS) - self._warmup_steps
             total = max(total, 1)
             lr = self._compute_lr_step_based(adjusted, total)
 
@@ -112,29 +111,27 @@ class SmartScheduler:
         min_lr = self.config.min_lr
 
         if stype == "cosine_restart":
-            t_cur = self.config.t_0
+            t_cur = max(self.config.t_0, 1)
             epoch = adjusted_epoch
             while epoch >= t_cur:
                 epoch -= t_cur
                 t_cur = int(t_cur * self.config.t_mult)
-            lr = min_lr + (eff_lr - min_lr) * (
-                1 + math.cos(math.pi * epoch / t_cur)
-            ) / 2
+            lr = min_lr + (eff_lr - min_lr) * (1 + math.cos(math.pi * epoch / t_cur)) / 2
             return max(lr, min_lr)
 
         if stype == "cosine":
             total = max(
-                self.config.max_epochs - self.config.warmup_epochs, 1,
+                self.config.max_epochs - self.config.warmup_epochs,
+                1,
             )
             progress = min(adjusted_epoch / total, 1.0)
-            lr = min_lr + (eff_lr - min_lr) * (
-                1 + math.cos(math.pi * progress)
-            ) / 2
+            lr = min_lr + (eff_lr - min_lr) * (1 + math.cos(math.pi * progress)) / 2
             return max(lr, min_lr)
 
         if stype == "linear":
             total = max(
-                self.config.max_epochs - self.config.warmup_epochs, 1,
+                self.config.max_epochs - self.config.warmup_epochs,
+                1,
             )
             progress = min(adjusted_epoch / total, 1.0)
             lr = eff_lr * (1 - progress)
@@ -142,7 +139,8 @@ class SmartScheduler:
 
         if stype == "polynomial":
             total = max(
-                self.config.max_epochs - self.config.warmup_epochs, 1,
+                self.config.max_epochs - self.config.warmup_epochs,
+                1,
             )
             progress = min(adjusted_epoch / total, 1.0)
             lr = eff_lr * ((1 - progress) ** 2.0)
@@ -154,7 +152,9 @@ class SmartScheduler:
         return eff_lr
 
     def _compute_lr_step_based(
-        self, step: int, total: int,
+        self,
+        step: int,
+        total: int,
     ) -> float:
         """Compute LR for step-based schedules.
 
@@ -171,20 +171,16 @@ class SmartScheduler:
         progress = min(step / total, 1.0)
 
         if stype == "cosine_restart":
-            t_cur = self.config.t_0
+            t_cur = max(self.config.t_0, 1)
             s = step
             while s >= t_cur:
                 s -= t_cur
                 t_cur = int(t_cur * self.config.t_mult)
-            lr = min_lr + (eff_lr - min_lr) * (
-                1 + math.cos(math.pi * s / t_cur)
-            ) / 2
+            lr = min_lr + (eff_lr - min_lr) * (1 + math.cos(math.pi * s / t_cur)) / 2
             return max(lr, min_lr)
 
         if stype == "cosine":
-            lr = min_lr + (eff_lr - min_lr) * (
-                1 + math.cos(math.pi * progress)
-            ) / 2
+            lr = min_lr + (eff_lr - min_lr) * (1 + math.cos(math.pi * progress)) / 2
             return max(lr, min_lr)
 
         if stype == "linear":
@@ -212,7 +208,7 @@ class SmartScheduler:
             New learning rate.
         """
         self._lr_scale *= factor
-        new_lr = max(self.get_lr() * factor, self.config.min_lr)
+        new_lr = max(self._compute_lr_after_warmup(self._epoch), self.config.min_lr)
         self._set_lr(new_lr)
         return new_lr
 
@@ -225,11 +221,9 @@ class SmartScheduler:
         Returns:
             New learning rate.
         """
-        self._lr_scale = min(
-            self._lr_scale * factor,
-            self.initial_lr / max(self._base_lr, 1e-12),
-        )
-        new_lr = min(self.get_lr() * factor, self.initial_lr)
+        max_scale = self.initial_lr / max(self._base_lr, 1e-12)
+        self._lr_scale = min(self._lr_scale * factor, max_scale)
+        new_lr = max(self._compute_lr_after_warmup(self._epoch), self.config.min_lr)
         self._set_lr(new_lr)
         return new_lr
 
@@ -267,7 +261,8 @@ class SmartScheduler:
         self._lr_scale = state_dict.get("_lr_scale", 1.0)
         self._base_lr = state_dict.get("_base_lr", self._base_lr)
         self.initial_lr = state_dict.get(
-            "initial_lr", self.initial_lr,
+            "initial_lr",
+            self.initial_lr,
         )
 
 
@@ -301,6 +296,4 @@ def get_transformer_scheduler(
             num_training_steps=num_training_steps,
         )
     except ImportError:
-        raise ImportError(
-            "Install transformers: pip install transformers"
-        ) from None
+        raise ImportError("Install transformers: pip install transformers") from None
