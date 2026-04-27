@@ -48,15 +48,15 @@ def print_header(text: str):
 
 
 def print_success(text: str):
-    print(f"{GREEN}✓ {text}{RESET}")
+    print(f"{GREEN}V {text}{RESET}")
 
 
 def print_error(text: str):
-    print(f"{RED}✗ {text}{RESET}")
+    print(f"{RED}X {text}{RESET}")
 
 
 def print_warning(text: str):
-    print(f"{YELLOW}⚠ {text}{RESET}")
+    print(f"{YELLOW}! {text}{RESET}")
 
 
 class ResNetSyntheticDataset(Dataset):
@@ -628,17 +628,17 @@ def test_loss_decreases():
         last_loss = history[-1]["metrics"]["loss"]
 
         print_success(f"Training completed: time={elapsed:.2f}s")
-        print_success(f"Loss: {first_loss:.4f} → {last_loss:.4f}")
+        print_success(f"Loss: {first_loss:.4f} -> {last_loss:.4f}")
 
         # Main assertion: loss must decrease by at least 20%
         threshold = first_loss * 0.8
         if last_loss >= threshold:
             print_warning(
-                f"Loss didn't decrease enough: {first_loss:.4f} → {last_loss:.4f} "
+                f"Loss didn't decrease enough: {first_loss:.4f} -> {last_loss:.4f} "
                 f"(expected < {threshold:.4f})"
             )
             errors.append(
-                f"Loss didn't decrease: {first_loss:.4f} → {last_loss:.4f} "
+                f"Loss didn't decrease: {first_loss:.4f} -> {last_loss:.4f} "
                 f"(expected < {threshold:.4f})"
             )
         else:
@@ -861,7 +861,7 @@ def test_custom_architectures():
             first_loss = history_cb.history[0]["metrics"]["loss"]
             last_loss = history_cb.history[-1]["metrics"]["loss"]
             if last_loss < first_loss:
-                print_success(f"ResNet-like: loss {first_loss:.4f} → {last_loss:.4f} (decreased)")
+                print_success(f"ResNet-like: loss {first_loss:.4f} -> {last_loss:.4f} (decreased)")
             else:
                 print_warning(f"ResNet-like: loss didn't decrease")
 
@@ -1216,13 +1216,13 @@ def test_pretrain_minimal():
             first_loss = history_cb.history[0]["metrics"]["loss"]
             last_loss = history_cb.history[-1]["metrics"]["loss"]
 
-            print_success(f"Pretrain 3 epochs: loss {first_loss:.4f} → {last_loss:.4f}")
+            print_success(f"Pretrain 3 epochs: loss {first_loss:.4f} -> {last_loss:.4f}")
 
             if last_loss < first_loss:
                 reduction = (1 - last_loss / first_loss) * 100
                 print_success(f"Loss decreased by {reduction:.1f}%")
             else:
-                print_error(f"Loss didn't decrease: {first_loss:.4f} → {last_loss:.4f}")
+                print_error(f"Loss didn't decrease: {first_loss:.4f} -> {last_loss:.4f}")
                 errors.append(f"Pretrain 3 epochs: loss didn't decrease")
         else:
             print_warning("Training history is empty or too short")
@@ -1491,7 +1491,7 @@ def test_self_healing_procedure():
 
         current_lr = trainer.optimizer.param_groups[0]["lr"]
         if hasattr(core.scheduler, "reduce_lr"):
-            print_success(f"LR after rollback: {initial_lr:.6f} → {current_lr:.6f}")
+            print_success(f"LR after rollback: {initial_lr:.6f} -> {current_lr:.6f}")
         else:
             print_warning("Scheduler doesn't have reduce_lr method")
 
@@ -1654,18 +1654,18 @@ def test_pretrain_15_epochs():
             first_loss = history_cb.history[0]["metrics"]["loss"]
             last_loss = history_cb.history[-1]["metrics"]["loss"]
 
-            print_success(f"Pretrain 15 epochs: loss {first_loss:.4f} → {last_loss:.4f}")
+            print_success(f"Pretrain 15 epochs: loss {first_loss:.4f} -> {last_loss:.4f}")
 
             if last_loss < first_loss:
                 reduction = (1 - last_loss / first_loss) * 100
                 print_success(f"Loss decreased by {reduction:.1f}%")
 
                 if reduction >= 5:
-                    print_success(f"✓ Convergence confirmed: {reduction:.1f}% reduction")
+                    print_success(f"Convergence confirmed: {reduction:.1f}% reduction")
                 else:
                     print_warning(f"Loss decreased less than 5%: {reduction:.1f}%")
             else:
-                print_error(f"Loss didn't decrease: {first_loss:.4f} → {last_loss:.4f}")
+                print_error(f"Loss didn't decrease: {first_loss:.4f} -> {last_loss:.4f}")
                 errors.append(f"Pretrain 15 epochs: loss didn't decrease")
         else:
             print_warning("Training history is empty or too short")
@@ -1878,10 +1878,10 @@ def main():
             print(f"  - {error}")
 
     if passed == total:
-        print(f"\n{GREEN}🎉 All tests passed!{RESET}")
+        print(f"\n{GREEN}All tests passed!{RESET}")
         return 0
     else:
-        print(f"\n{RED}⚠ Some tests failed{RESET}")
+        print(f"\n{RED}Some tests failed{RESET}")
         return 1
 
 
