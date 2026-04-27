@@ -5,10 +5,11 @@ TypedDict for output data validation and DatasetConfig for factory.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict, Union
-from pathlib import Path
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, TypedDict
 
 # =============================================================================
 # Data Schemas (TypedDict for validation)
@@ -68,7 +69,7 @@ class MultimodalSample(TypedDict, total=False):
     """
 
     inputs: dict
-    labels: Union[str, int]
+    labels: str | int
     metadata: dict
 
 
@@ -90,7 +91,7 @@ class TabularSample(TypedDict, total=False):
 
 
 # Schema registry by data types
-SCHEMA_REGISTRY: Dict[str, type[TypedDict]] = {
+SCHEMA_REGISTRY: dict[str, type[TypedDict]] = {
     "text": TextSample,
     "image": ImageSample,
     "multimodal": MultimodalSample,
@@ -172,21 +173,21 @@ class DatasetConfig:
     data_type: Literal["text", "image", "multimodal", "custom", "streaming", "tabular"] = "text"
 
     # Data paths
-    data_path: Optional[Union[str, Path]] = None
-    train_path: Optional[Union[str, Path]] = None
-    eval_path: Optional[Union[str, Path]] = None
+    data_path: str | Path | None = None
+    train_path: str | Path | None = None
+    eval_path: str | Path | None = None
 
     # For multimodal/tabular data
-    image_path: Optional[Union[str, Path]] = None
-    image_column: Optional[str] = None
-    text_column: Optional[str] = None
-    label_column: Optional[str] = None
+    image_path: str | Path | None = None
+    image_column: str | None = None
+    text_column: str | None = None
+    label_column: str | None = None
 
     # Loading parameters
     batch_size: int = 32
     eval_batch_size: int = 64
     num_workers: int = 0
-    prefetch_factor: Optional[int] = None
+    prefetch_factor: int | None = None
     pin_memory: bool = True
     persistent_workers: bool = False
 
@@ -194,10 +195,10 @@ class DatasetConfig:
     tokenizer: Any = None
     image_processor: Any = None
     transform: Any = None
-    format_fn: Optional[Callable] = None
+    format_fn: Callable | None = None
 
     # Caching and preprocessing
-    cache_dir: Optional[Union[str, Path]] = None
+    cache_dir: str | Path | None = None
     use_cache: bool = True
     pre_tokenize: bool = False
     pre_compute_features: bool = False
@@ -216,7 +217,7 @@ class DatasetConfig:
 
     # Additional parameters
     max_length: int = 512
-    custom_kwargs: Dict[str, Any] = field(default_factory=dict)
+    custom_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -241,7 +242,7 @@ class DatasetConfig:
             # Automatically switch to streaming for large files
             if self.data_path and isinstance(self.data_path, Path):
                 if self.data_path.exists() and self.data_path.stat().st_size > 10 * 1024**3:  # 10GB
-                    print(f"[WARN] File > 10GB, streaming=True recommended")
+                    print("[WARN] File > 10GB, streaming=True recommended")
 
         # Check conflicting parameters
         if self.pre_tokenize and self.streaming:
@@ -252,9 +253,8 @@ class DatasetConfig:
         if self.prefetch_factor is None and self.num_workers > 0:
             self.prefetch_factor = 2
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dict (for JSON/YAML)."""
-        import json
         from dataclasses import asdict
 
         # Exclude non-serializable fields
@@ -272,7 +272,7 @@ class DatasetConfig:
         return result
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> DatasetConfig:
+    def from_dict(cls, data: dict[str, Any]) -> DatasetConfig:
         """Deserialize from dict."""
         # Convert paths back to Path
         for key in ["data_path", "train_path", "eval_path", "image_path", "cache_dir"]:
@@ -281,7 +281,7 @@ class DatasetConfig:
 
         return cls(**data)
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         """Save configuration to JSON file."""
         import json
 
@@ -294,12 +294,12 @@ class DatasetConfig:
         print(f"[SAVE] Configuration saved: {path}")
 
     @classmethod
-    def load(cls, path: Union[str, Path]) -> DatasetConfig:
+    def load(cls, path: str | Path) -> DatasetConfig:
         """Load configuration from JSON file."""
         import json
 
         path = Path(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         return cls.from_dict(data)

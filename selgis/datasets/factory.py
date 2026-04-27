@@ -5,22 +5,23 @@ Single entry point for creating datasets of all types.
 """
 
 from __future__ import annotations
+
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch.utils.data import (
-    Dataset,
     DataLoader,
-    random_split,
+    Dataset,
     DistributedSampler,
     IterableDataset,
     Subset,
+    random_split,
 )
 
+from selgis.datasets.base import BaseDataset
 from selgis.datasets.config import DatasetConfig
-from selgis.datasets.base import BaseDataset, StreamingDataset
 from selgis.utils import seed_everything
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def create_dataset(config: DatasetConfig) -> BaseDataset:
 
 def _create_text_dataset(config: DatasetConfig):
     """Create a text dataset."""
-    from selgis.datasets.text import TextDataset, HFTextDataset
+    from selgis.datasets.text import HFTextDataset, TextDataset
 
     data_path = config.data_path or config.train_path
 
@@ -159,7 +160,7 @@ def _create_multimodal_dataset(config: DatasetConfig):
 
 def _create_streaming_dataset(config: DatasetConfig):
     """Create a streaming dataset."""
-    from selgis.datasets.streaming import StreamingTextDataset, StreamingCSVDataset
+    from selgis.datasets.streaming import StreamingCSVDataset, StreamingTextDataset
 
     data_path = config.data_path or config.train_path
 
@@ -214,7 +215,7 @@ def _create_custom_dataset(config: DatasetConfig):
 
 def create_dataloaders(
     config: DatasetConfig,
-) -> Tuple[DataLoader, Optional[DataLoader]]:
+) -> tuple[DataLoader, DataLoader | None]:
     """
     Create train and eval DataLoader.
 
@@ -327,7 +328,7 @@ def _create_dataloader(
     dataset: Dataset,
     batch_size: int = 32,
     num_workers: int = 0,
-    prefetch_factor: Optional[int] = None,
+    prefetch_factor: int | None = None,
     pin_memory: bool = True,
     shuffle: bool = False,
     seed: int = 42,
@@ -420,7 +421,7 @@ def _create_dataloader(
 def prepare_data_for_trainer(
     trainer: Any,
     config: DatasetConfig,
-) -> Tuple[DataLoader, Optional[DataLoader]]:
+) -> tuple[DataLoader, DataLoader | None]:
     """
     Prepare data for Trainer.
 

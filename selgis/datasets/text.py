@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import json
 import mmap
-import os
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch.utils.data import Dataset
-
-from selgis.datasets.config import DatasetConfig
-from selgis.utils import seed_everything
 
 
 class TextDataset(Dataset):
@@ -37,11 +33,11 @@ class TextDataset(Dataset):
 
     def __init__(
         self,
-        data_path: Union[str, Path],
+        data_path: str | Path,
         tokenizer: Any = None,
         max_length: int = 512,
         format_fn: Any = None,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
         file_format: str = "jsonl",
         text_column: str = "text",
         pre_tokenize: bool = False,
@@ -87,7 +83,7 @@ class TextDataset(Dataset):
     def _build_index(self) -> None:
         """Build line offset index for fast random access."""
         if self.use_mmap:
-            self._file = open(self.data_path, "r")
+            self._file = open(self.data_path)
             self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
 
             pos = 0
@@ -100,7 +96,7 @@ class TextDataset(Dataset):
                 pos = self._mmap.tell()
                 line_num += 1
         else:
-            with open(self.data_path, "r", encoding="utf-8") as f:
+            with open(self.data_path, encoding="utf-8") as f:
                 pos = 0
                 for line in f:
                     line_len = len(line.encode("utf-8"))
@@ -115,7 +111,7 @@ class TextDataset(Dataset):
             self._mmap.seek(start)
             line = self._mmap.readline().decode("utf-8").rstrip("\n")
         else:
-            with open(self.data_path, "r", encoding="utf-8") as f:
+            with open(self.data_path, encoding="utf-8") as f:
                 f.seek(start)
                 line = f.read(length).rstrip("\n")
 
@@ -129,7 +125,7 @@ class TextDataset(Dataset):
             self._file.seek(start)
             line = self._file.read(length).rstrip("\n")
         else:
-            with open(self.data_path, "r", encoding="utf-8") as f:
+            with open(self.data_path, encoding="utf-8") as f:
                 f.seek(start)
                 line = f.read(length).rstrip("\n")
 
@@ -147,7 +143,7 @@ class TextDataset(Dataset):
         """Load all records into memory (for small files)."""
         self._records: list[dict[str, Any]] = []
 
-        with open(self.data_path, "r", encoding="utf-8") as f:
+        with open(self.data_path, encoding="utf-8") as f:
             for line in f:
                 record = self._parse_line(line.rstrip("\n"))
                 self._records.append(record)
@@ -286,7 +282,7 @@ class HFTextDataset(Dataset):
         dataset_name: str,
         tokenizer: Any = None,
         max_length: int = 512,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
         streaming: bool = False,
         text_column: str = "text",
         format_fn: Any = None,

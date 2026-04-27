@@ -13,15 +13,16 @@ Optimizations:
 """
 
 from __future__ import annotations
+
 import csv
 import gzip
 import json
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Union
+from typing import Any
 
 import torch
-from torch.utils.data import IterableDataset
 
 from selgis.datasets.base import StreamingDataset
 
@@ -56,12 +57,12 @@ class StreamingTextDataset(StreamingDataset):
 
     def __init__(
         self,
-        data_path: Union[str, Path],
-        tokenizer: Optional[Any] = None,
+        data_path: str | Path,
+        tokenizer: Any | None = None,
         max_length: int = 512,
         buffer_size: int = 1000,
-        format_fn: Optional[Callable] = None,
-        total_lines: Optional[int] = None,
+        format_fn: Callable | None = None,
+        total_lines: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -74,7 +75,7 @@ class StreamingTextDataset(StreamingDataset):
 
         # Iteration state
         self._file = None
-        self._buffer: Deque[str] = deque()
+        self._buffer: deque[str] = deque()
         self._line_count = 0
         self._global_line_idx = 0
 
@@ -117,7 +118,7 @@ class StreamingTextDataset(StreamingDataset):
                 raise RuntimeError(f"Failed to open file {self.data_path}: {e}") from None
         else:
             try:
-                self._file = open(self.data_path, "r", encoding="utf-8")
+                self._file = open(self.data_path, encoding="utf-8")
             except Exception as e:
                 raise RuntimeError(f"Failed to open file {self.data_path}: {e}") from None
 
@@ -125,7 +126,7 @@ class StreamingTextDataset(StreamingDataset):
 
         return self
 
-    def __next__(self) -> Dict[str, Any]:
+    def __next__(self) -> dict[str, Any]:
         """Get next element from stream."""
         if self._file is None:
             raise StopIteration
@@ -182,7 +183,7 @@ class StreamingTextDataset(StreamingDataset):
                 # Skip invalid lines
                 continue
 
-    def _tokenize(self, text: str) -> Dict[str, Any]:
+    def _tokenize(self, text: str) -> dict[str, Any]:
         """Tokenize text."""
         if self.tokenizer is None:
             raise ValueError("Tokenizer required")
@@ -219,7 +220,7 @@ class StreamingTextDataset(StreamingDataset):
         self._total_lines = length
         super().set_total_length(length)
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Streaming dataset statistics."""
         stats = super().get_stats()
         stats.update(
@@ -253,12 +254,12 @@ class StreamingCSVDataset(StreamingDataset):
 
     def __init__(
         self,
-        data_path: Union[str, Path],
+        data_path: str | Path,
         text_column: str = "text",
-        label_column: Optional[str] = None,
+        label_column: str | None = None,
         buffer_size: int = 1000,
-        format_fn: Optional[Callable] = None,
-        total_lines: Optional[int] = None,
+        format_fn: Callable | None = None,
+        total_lines: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -270,10 +271,10 @@ class StreamingCSVDataset(StreamingDataset):
         self._total_lines = total_lines
 
         self._file = None
-        self._buffer: Deque[Dict[str, Any]] = deque()
+        self._buffer: deque[dict[str, Any]] = deque()
         self._line_count = 0
-        self._headers: Optional[List[str]] = None
-        self._reader: Optional[csv.DictReader] = None
+        self._headers: list[str] | None = None
+        self._reader: csv.DictReader | None = None
         self._global_line_idx = 0
         self._worker_id = 0
         self._num_workers = 1
@@ -302,7 +303,7 @@ class StreamingCSVDataset(StreamingDataset):
 
         # Open CSV file with error handling
         try:
-            self._file = open(self.data_path, "r", encoding="utf-8", newline="")
+            self._file = open(self.data_path, encoding="utf-8", newline="")
             self._reader = csv.DictReader(self._file)
             self._headers = self._reader.fieldnames
         except Exception as e:
@@ -312,7 +313,7 @@ class StreamingCSVDataset(StreamingDataset):
 
         return self
 
-    def __next__(self) -> Dict[str, Any]:
+    def __next__(self) -> dict[str, Any]:
         """Get next element."""
         if self._file is None:
             raise StopIteration
@@ -371,7 +372,7 @@ class StreamingCSVDataset(StreamingDataset):
     def __del__(self):
         self._close_file()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         stats = super().get_stats()
         stats.update(
             {
