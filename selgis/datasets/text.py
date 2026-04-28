@@ -54,9 +54,9 @@ class TextDataset(Dataset):
         self.text_column = text_column
         self.use_mmap = use_mmap and file_format == "jsonl"
 
-        self._file = None
-        self._mmap = None
-        self._index: list[tuple[int, int]] = []
+        self._file = None  # type: ignore[assignment]
+        self._mmap = None  # type: ignore[assignment]
+        self._index: list = []
         self._tokenized_cache = None
 
         if not self.data_path.exists():
@@ -231,11 +231,11 @@ class TextDataset(Dataset):
 
     def get_stats(self) -> dict[str, Any]:
         """Return dataset statistics."""
-        load_times = self._metrics["load_time_ms"]
+        load_times = self._metrics["load_time_ms"]  # type: ignore[attr-defined]
 
         if load_times:
-            sorted_times = sorted(load_times)
-            p95 = sorted_times[int(len(sorted_times) * 0.95)] if len(sorted_times) > 0 else 0
+            sorted_times = sorted(load_times)  # type: ignore[arg-type]
+            p95 = sorted_times[int(len(sorted_times) * 0.95)] if len(sorted_times) > 0 else 0  # type: ignore[arg-type]
         else:
             p95 = 0
 

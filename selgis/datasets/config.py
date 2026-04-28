@@ -91,7 +91,7 @@ class TabularSample(TypedDict, total=False):
 
 
 # Schema registry by data types
-SCHEMA_REGISTRY: dict[str, type[TypedDict]] = {
+SCHEMA_REGISTRY: dict[str, type] = {
     "text": TextSample,
     "image": ImageSample,
     "multimodal": MultimodalSample,
