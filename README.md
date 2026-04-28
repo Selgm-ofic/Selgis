@@ -245,7 +245,7 @@ train_loader, eval_loader = create_dataloaders(config)
 selgis train
 
 # From config
-selgis train --config config.yaml
+selgis train --config config.yaml (or .json)
 
 # Check device
 selgis device
