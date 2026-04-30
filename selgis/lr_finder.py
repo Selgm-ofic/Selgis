@@ -260,6 +260,13 @@ class LRFinder:
                 # For causal LM, include labels if available
                 if labels is not None:
                     inputs_dict["labels"] = labels
+                # Ensure input_ids exists
+                if "input_ids" not in inputs_dict:
+                    if "text" in inputs_dict:
+                        # Try tokenizing if tokenizer available
+                        if self.criterion is not None and hasattr(self.criterion, "tokenizer"):
+                            raise ValueError("Need tokenizer to process text input")
+                    raise ValueError("batch must contain input_ids for LLM training")
                 outputs = self.model(**inputs_dict)
                 if hasattr(outputs, "loss") and outputs.loss is not None:
                     return outputs.loss

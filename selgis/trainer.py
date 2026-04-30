@@ -98,25 +98,62 @@ class Trainer:
             amp_dtype = torch.bfloat16
 
         if config.lr_finder_enabled and not getattr(config, "resume_from_checkpoint", None):
-            lr_finder = LRFinder(
-                model,
-                optimizer,
-                criterion=criterion,
-                device=self.device,
-                trainable_only=config.lr_finder_trainable_only,
-                amp_dtype=amp_dtype,
-                save_optimizer_state=config.lr_finder_save_optimizer_state,
-            )
-            self.initial_lr = lr_finder.find(
-                train_dataloader,
-                forward_fn=forward_fn,
-                start_lr=config.lr_finder_start,
-                end_lr=config.lr_finder_end,
-                num_steps=config.lr_finder_steps,
-            )
-            for pg in self.optimizer.param_groups:
-                pg["lr"] = self.initial_lr
-            logger.info("LR finder found optimal LR: %.2e", self.initial_lr)
+            # Check if problem type supports LR finder
+            problem_type = getattr(config, "problem_type", "")
+            if problem_type == "causal_lm":
+                # Use custom forward_fn for causal LM
+                def causal_lm_forward(model, batch):
+                    from selgis.utils import is_dict_like, move_to_device, unpack_batch
+                    inputs, labels = unpack_batch(batch)
+                    if is_dict_like(inputs):
+                        inputs_dict = dict(inputs)
+                        if labels is not None:
+                            inputs_dict["labels"] = labels
+                        if not self._has_device_map:
+                            inputs_dict = move_to_device(inputs_dict, self.device)
+                        outputs = model(**inputs_dict)
+                        return outputs.loss, outputs.logits if hasattr(outputs, "logits") else outputs.loss
+                    return None, None
+
+                lr_finder = LRFinder(
+                    model,
+                    optimizer,
+                    criterion=None,
+                    device=self.device,
+                    trainable_only=config.lr_finder_trainable_only,
+                    amp_dtype=amp_dtype,
+                    save_optimizer_state=config.lr_finder_save_optimizer_state,
+                )
+                self.initial_lr = lr_finder.find(
+                    train_dataloader,
+                    forward_fn=causal_lm_forward,
+                    start_lr=config.lr_finder_start,
+                    end_lr=config.lr_finder_end,
+                    num_steps=config.lr_finder_steps,
+                )
+                for pg in self.optimizer.param_groups:
+                    pg["lr"] = self.initial_lr
+                logger.info("LR finder found optimal LR: %.2e", self.initial_lr)
+            else:
+                lr_finder = LRFinder(
+                    model,
+                    optimizer,
+                    criterion=criterion,
+                    device=self.device,
+                    trainable_only=config.lr_finder_trainable_only,
+                    amp_dtype=amp_dtype,
+                    save_optimizer_state=config.lr_finder_save_optimizer_state,
+                )
+                self.initial_lr = lr_finder.find(
+                    train_dataloader,
+                    forward_fn=forward_fn,
+                    start_lr=config.lr_finder_start,
+                    end_lr=config.lr_finder_end,
+                    num_steps=config.lr_finder_steps,
+                )
+                for pg in self.optimizer.param_groups:
+                    pg["lr"] = self.initial_lr
+                logger.info("LR finder found optimal LR: %.2e", self.initial_lr)
         else:
             self.initial_lr = self.optimizer.param_groups[0]["lr"]
 
